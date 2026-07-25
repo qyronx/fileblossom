@@ -2,11 +2,11 @@
 
 A simple file upload and management service built on the Blossom protocol.
 
-## Emergency Access Address
+## Alternative Site
 
-If the main service becomes unavailable or inaccessible, please use the following backup address:
+This repository is an alternative site for https://devareta2.onrender.com/.
 
-> **Emergency access address:** https://devareta2.onrender.com/
+If the original site becomes unavailable or inaccessible, this repository can be used as an alternative.
 
 ## Features
 
@@ -37,16 +37,10 @@ File-Blossom/
 └── ...
 ```
 
-> The actual project structure may vary depending on the current version of the project.
-
-## Service Address
-
-* **Emergency access address:** https://devareta2.onrender.com/
-
 ## Contributing
 
 Bug reports, feature suggestions, and pull requests are welcome.
 
 ## License
 
-Please refer to the `LICENSE` file included in this repository for licensing information.
+This project is licensed under the AGPL-3.0 License. See the `LICENSE` file for more information.
