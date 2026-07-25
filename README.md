@@ -43,4 +43,4 @@ Bug reports, feature suggestions, and pull requests are welcome.
 
 ## License
 
-This project is licensed under the AGPL-3.0 License. See the `LICENSE` file for more information.
+This project is licensed. See the `LICENSE` file for more information.
