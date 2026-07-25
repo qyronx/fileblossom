@@ -1,0 +1,3285 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Blossom</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: #0b0d11;
+            background-image:
+                radial-gradient(circle at 15% 0%, rgba(240,98,146,0.08), transparent 45%),
+                radial-gradient(circle at 100% 100%, rgba(240,98,146,0.05), transparent 40%);
+            color: #e6edf3;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: #161b22;
+            padding: 2rem;
+            border-radius: 16px;
+            max-width: 750px;
+            width: 100%;
+            border: 1px solid #30363d;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        h1 {
+            font-family: 'Space Grotesk', 'Inter', sans-serif;
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
+            margin-bottom: 4px;
+            background: linear-gradient(135deg, #f06292, #f8a5c2);
+            background-clip: text;
+            -webkit-background-clip: text;
+            color: transparent;
+        }
+        .sub {
+            color: #8b949e;
+            font-size: 14px;
+        }
+        .lang-switch {
+            display: flex;
+            flex-shrink: 0;
+            background: #0d1117;
+            border-radius: 7px;
+            padding: 3px;
+            border: 1px solid #30363d;
+            gap: 2px;
+        }
+        .lang-option {
+            padding: 5px 12px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            color: #6e7681;
+            cursor: pointer;
+            transition: 0.2s;
+            user-select: none;
+        }
+        .lang-option:hover { color: #c9d1d9; }
+        .lang-option.active {
+            color: #f06292;
+            background: rgba(240,98,146,0.15);
+        }
+        .upload-area {
+            border: 2px dashed #30363d;
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            background: #0d1117;
+            margin-bottom: 16px;
+        }
+        .upload-area:hover, .upload-area.dragover {
+            border-color: #f06292;
+            background: #0d1117;
+            transform: scale(1.01);
+        }
+        .upload-area .icon { font-size: 48px; display: block; margin-bottom: 8px; }
+        .upload-area p { color: #8b949e; }
+        .upload-area strong { color: #f0f6fc; }
+        #fileInput { display: none; }
+
+        .multi-mode-toggle {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 16px;
+            padding: 10px 16px;
+            background: #0d1117;
+            border-radius: 8px;
+            border: 1px solid #21262d;
+        }
+        .mode-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: #e6edf3;
+        }
+        .toggle-switch {
+            display: flex;
+            background: #21262d;
+            border-radius: 6px;
+            padding: 3px;
+            cursor: pointer;
+            border: 1px solid #30363d;
+            transition: 0.3s;
+            user-select: none;
+        }
+        .toggle-switch.active {
+            border-color: #f06292;
+            background: #1a1a2e;
+        }
+        .toggle-option {
+            padding: 4px 14px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            transition: 0.3s;
+            color: #484f58;
+        }
+        .toggle-option.off {
+            color: #8b949e;
+        }
+        .toggle-option.on {
+            color: #484f58;
+        }
+        .toggle-switch.active .toggle-option.off {
+            color: #484f58;
+        }
+        .toggle-switch.active .toggle-option.on {
+            color: #f06292;
+            background: rgba(240,98,146,0.15);
+        }
+        .toggle-status {
+            font-size: 13px;
+            color: #8b949e;
+            margin-left: auto;
+        }
+        .toggle-status.active {
+            color: #f06292;
+        }
+        .multi-upload-btn {
+            display: none;
+            width: 100%;
+            padding: 12px;
+            margin-top: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            background: #238636;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .multi-upload-btn:hover { background: #2ea043; }
+        .multi-upload-btn.visible { display: block; }
+
+        .file-list-preview {
+            margin-top: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: #0d1117;
+            border-radius: 8px;
+            border: 1px solid #21262d;
+            padding: 8px;
+            display: none;
+        }
+        .file-list-preview.visible { display: block; }
+        .file-list-preview .file-item {
+            font-size: 12px;
+            color: #8b949e;
+            padding: 4px 8px;
+            border-bottom: 1px solid #1a1a2a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .file-list-preview .file-item:last-child { border-bottom: none; }
+        .file-list-preview .file-item .size { color: #484f58; }
+        .file-list-preview .file-item .remove-btn {
+            color: #484f58;
+            cursor: pointer;
+            font-size: 14px;
+            background: none;
+            border: none;
+            padding: 0 4px;
+            transition: color 0.2s;
+            line-height: 1;
+        }
+        .file-list-preview .file-item .remove-btn:hover {
+            color: #f85149;
+        }
+
+        .progress-wrap {
+            display: none;
+            margin: 16px 0;
+            background: #0d1117;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid #21262d;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #f06292, #f8a5c2);
+            transition: width 0.3s ease;
+        }
+        .progress-text {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: #8b949e;
+            margin-top: 6px;
+        }
+        .progress-chunk-info {
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: 4px;
+            text-align: center;
+        }
+
+        .result-box {
+            margin: 16px 0;
+            padding: 16px;
+            border-radius: 8px;
+            background: #0d1117;
+            border: 1px solid #21262d;
+            display: none;
+        }
+        .result-box.success { border-color: #238636; }
+        .result-box.error { border-color: #da3633; }
+
+        .link-field {
+            display: flex;
+            gap: 8px;
+            margin: 10px 0;
+        }
+        .link-field input {
+            flex: 1;
+            padding: 10px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e6edf3;
+            font-size: 13px;
+            font-family: 'JetBrains Mono', monospace;
+            outline: none;
+        }
+        .link-field input:focus { border-color: #f06292; }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 14px;
+            cursor: pointer;
+            transition: 0.2s;
+            background: #238636;
+            color: #fff;
+        }
+        .btn:hover { background: #2ea043; }
+        .btn-secondary {
+            background: #21262d;
+            color: #c9d1d9;
+        }
+        .btn-secondary:hover { background: #30363d; }
+
+        .decrypt-section {
+            margin-top: 28px;
+            padding-top: 24px;
+            border-top: 1px solid #21262d;
+        }
+        .decrypt-section h3 {
+            font-family: 'Space Grotesk', 'Inter', sans-serif;
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: #f0f6fc;
+        }
+        .decrypt-row {
+            display: flex;
+            gap: 8px;
+        }
+        .decrypt-row input {
+            flex: 1;
+            padding: 10px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            color: #e6edf3;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13px;
+            outline: none;
+        }
+        .decrypt-row input:focus { border-color: #f06292; }
+
+        .badge {
+            display: inline-block;
+            font-size: 11px;
+            padding: 2px 10px;
+            border-radius: 20px;
+            background: #21262d;
+            color: #8b949e;
+            margin-top: 4px;
+        }
+        .mt-8 { margin-top: 8px; }
+        .flex-between { display: flex; justify-content: space-between; align-items: center; }
+        .text-green { color: #3fb950; }
+        .text-red { color: #f85149; }
+        .text-muted { color: #8b949e; }
+        .truncate {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+            display: inline-block;
+            vertical-align: middle;
+        }
+        @media (max-width: 600px) {
+            .container { padding: 1.25rem; }
+            .link-field { flex-direction: column; }
+            .decrypt-row { flex-direction: column; }
+            .header-row { flex-direction: column; align-items: flex-start; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
+        button:focus-visible,
+        .toggle-switch:focus-visible,
+        .lang-option:focus-visible,
+        input:focus-visible,
+        textarea:focus-visible,
+        .upload-area:focus-visible,
+        .footer-link:focus-visible {
+            outline: 2px solid #f06292;
+            outline-offset: 2px;
+        }
+
+        .short-url {
+            color: #f06292;
+            text-decoration: underline;
+            cursor: pointer;
+        }
+        .short-url:hover { color: #f8a5c2; }
+
+        .url-parts-container {
+            margin-top: 8px;
+            max-height: 150px;
+            overflow-y: auto;
+            background: #0d1117;
+            border-radius: 6px;
+            border: 1px solid #21262d;
+            padding: 8px;
+        }
+        .url-part {
+            font-size: 11px;
+            color: #8b949e;
+            font-family: monospace;
+            padding: 2px 4px;
+            border-bottom: 1px solid #1a1a2a;
+            word-break: break-all;
+        }
+        .url-part:last-child { border-bottom: none; }
+        .url-part .part-number {
+            color: #f06292;
+            font-weight: 600;
+            margin-right: 6px;
+        }
+
+        
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.7);
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-content {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 16px;
+            max-width: 600px;
+            width: 100%;
+            max-height: 80vh;
+            overflow-y: auto;
+            padding: 2rem;
+            position: relative;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+        }
+        .modal-content h2 {
+            font-size: 22px;
+            color: #f0f6fc;
+            margin-bottom: 16px;
+        }
+        .modal-content h3 {
+            font-size: 16px;
+            color: #f0f6fc;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+        .modal-content p {
+            font-size: 14px;
+            color: #c9d1d9;
+            line-height: 1.6;
+            margin-bottom: 8px;
+        }
+        .modal-content ul {
+            font-size: 14px;
+            color: #c9d1d9;
+            padding-left: 20px;
+            margin-bottom: 8px;
+        }
+        .modal-content li { margin-bottom: 4px; }
+        .modal-content .btn-close {
+            position: sticky;
+            top: 0;
+            float: right;
+            background: none;
+            border: none;
+            color: #8b949e;
+            font-size: 24px;
+            cursor: pointer;
+            padding: 0 8px;
+        }
+        .modal-content .btn-close:hover { color: #f0f6fc; }
+        .modal-content a {
+            color: #f06292;
+            text-decoration: underline;
+        }
+        .modal-content a:hover { color: #f8a5c2; }
+        .modal-content .code-block {
+            background: #0d1117;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 13px;
+            color: #e6edf3;
+            border: 1px solid #21262d;
+            margin: 4px 0 8px 0;
+            word-break: break-all;
+        }
+
+        .footer-link {
+            color: #484f58;
+            text-decoration: underline;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .footer-link:hover { color: #8b949e; }
+
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0d1117;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 3px;
+            transition: background 0.2s ease;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #f06292;
+        }
+        ::-webkit-scrollbar-corner {
+            background: #0d1117;
+        }
+        * {
+            scrollbar-width: thin;
+            scrollbar-color: #30363d #0d1117;
+        }
+        *:hover {
+            scrollbar-color: #f06292 #0d1117;
+        }
+        .modal-content::-webkit-scrollbar {
+            width: 6px;
+        }
+        .modal-content::-webkit-scrollbar-track {
+            background: #0d1117;
+            border-radius: 3px;
+        }
+        .modal-content::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 3px;
+        }
+        .modal-content::-webkit-scrollbar-thumb:hover {
+            background: #f06292;
+        }
+        .url-parts-container::-webkit-scrollbar {
+            width: 4px;
+        }
+        .url-parts-container::-webkit-scrollbar-track {
+            background: #0d1117;
+            border-radius: 2px;
+        }
+        .url-parts-container::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 2px;
+        }
+        .url-parts-container::-webkit-scrollbar-thumb:hover {
+            background: #f06292;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header-row">
+            <div>
+                <h1>🌸 File Blossom</h1>
+                <div class="sub" id="subTagline">Encrypted File Sharing</div>
+            </div>
+            <div class="lang-switch" id="langSwitch" role="group" aria-label="Language">
+                <span class="lang-option" id="langKo" data-lang="ko" tabindex="0" role="button">KO</span>
+                <span class="lang-option" id="langEn" data-lang="en" tabindex="0" role="button">EN</span>
+            </div>
+        </div>
+
+        <!-- 토글 HTML -->
+        <div class="multi-mode-toggle">
+            <span class="mode-label" id="modeLabel">📂 <span data-i18n="multiModeLabel">멀티 모드</span></span>
+            <div class="toggle-switch" id="multiToggle" role="switch" aria-checked="false" tabindex="0">
+                <span class="toggle-option off">OFF</span>
+                <span class="toggle-option on">ON</span>
+            </div>
+            <span class="toggle-status" id="multiStatus" data-i18n="statusOff">비활성</span>
+        </div>
+        <div class="multi-mode-toggle" style="margin-top:8px;">
+            <span class="mode-label"><span data-i18n="Auto-Del On Download">다운로드 시 자동 삭제</span></span>
+            <div class="toggle-switch" id="autoDeleteToggle" role="switch" aria-checked="false" tabindex="0">
+                <span class="toggle-option off">OFF</span>
+                <span class="toggle-option on">ON</span>
+            </div>
+            <span class="toggle-status" id="autoDeleteStatus" data-i18n="statusOff">비활성</span>
+        </div>
+        <div class="upload-area" id="dropZone" role="button" tabindex="0">
+            <span class="icon">🌸</span>
+            <p><strong data-i18n="clickWord">클릭</strong><span data-i18n="uploadHintRest">하여 파일 선택 또는 드래그앤드롭</span></p>
+            <p class="text-muted" style="font-size:12px;margin-top:6px;" id="uploadModeHint" data-i18n="uploadModeHintDefault">자동 분할 업로드 · AES-256-GCM 암호화</p>
+            <input type="file" id="fileInput" webkitdirectory multiple>
+        </div>
+
+        <div class="file-list-preview" id="fileListPreview">
+            <div style="font-size:12px;color:#8b949e;padding:4px 8px;font-weight:600;display:flex;justify-content:space-between;align-items:center;">
+                <span data-i18n="selectedFiles">선택된 파일들</span>
+                <span id="fileCount" style="font-size:10px;color:#484f58;">0</span>
+            </div>
+            <div id="fileListItems"></div>
+        </div>
+
+
+        <button class="multi-upload-btn" id="multiUploadBtn" data-i18n="compressAndUpload">압축하여 업로드</button>
+
+        <div class="progress-wrap" id="progressWrap">
+            <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+            <div class="progress-text">
+                <span id="progressLabel" data-i18n="preparing">준비 중...</span>
+                <span id="progressPercent">0%</span>
+            </div>
+            <div class="progress-chunk-info" id="chunkInfo">0 / 0</div>
+        </div>
+
+        <div class="result-box" id="resultBox">
+            <div id="resultContent"></div>
+        </div>
+
+
+        <div class="decrypt-section">
+            <h3 data-i18n="decryptTitle">파일 복호화</h3>
+            <p class="text-muted" style="font-size:13px;margin-bottom:10px;" data-i18n="decryptDesc">공유 링크를 붙여넣고 복호화 버튼을 누르세요</p>
+            <div class="decrypt-row">
+                <input type="text" id="shareLinkInput" placeholder="https://.../#{hash},{key},{iv},{chunkHashes}">
+                <button class="btn" id="decryptBtn" data-i18n="decryptAndDownload">복호화 및 다운로드</button>
+            </div>
+            <div id="decryptResult" class="mt-8" style="font-size:14px;"></div>
+        </div>
+
+        <div style="margin-top:20px;font-size:12px;color:#484f58;text-align:center;border-top:1px solid #21262d;padding-top:16px;">
+            <span class="footer-link" id="termsLink" tabindex="0" role="button" data-i18n="termsLink">이용약관 및 작동 원리</span>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="termsModal">
+        <div class="modal-content">
+            <button class="btn-close" id="modalCloseBtn" aria-label="Close">&times;</button>
+            <h2 data-i18n="modalTitle">🌸 File Blossom 이용약관 및 작동 원리</h2>
+            <h3 data-i18n="modalHowTitle">🔐 작동 원리</h3>
+            <p data-i18n-html="modalHowIntro">File Blossom은 <strong>클라이언트 사이드 암호화</strong>를 기반으로 하는 파일 공유 도구입니다.</p>
+            <ul>
+                <li data-i18n-html="modalHow1"><strong>암호화:</strong> 파일은 브라우저에서 <strong>AES-256-GCM</strong> 알고리즘으로 암호화됩니다. 암호화 키는 서버로 전송되지 않으며, URL 프래그먼트(#)에만 저장됩니다.</li>
+                <li data-i18n-html="modalHow2"><strong>저장:</strong> 암호화된 파일은 <strong>Blossom</strong> 스토리지 서버에 분할 업로드됩니다. 파일은 SHA-256 해시로 주소 지정되며, 여러 서버에 미러링됩니다.</li>
+                <li data-i18n-html="modalHow3"><strong>위장:</strong> 파일은 1x1 PNG 이미지 끝에 숨겨져서 <strong>PNG 스터빙</strong> 기법으로 전송됩니다.</li>
+                <li data-i18n-html="modalHow4"><strong>공유:</strong> <strong>Nostr Gift-wrap</strong>을 통해 URL을 단축하여 안전하게 전달할 수 있습니다.</li>
+            </ul>
+            <h3 data-i18n="modalUsageTitle">File Blossom 사용방법</h3>
+            <ol>
+                <li data-i18n="modalUsage1">파일을 업로드합니다.</li>
+                <li data-i18n-html="modalUsage2">공유 URL이 나오면 복사해주세요.</li>
+                <li data-i18n-html="modalUsage3">나중에 삭제할 일이 생길 거 같으면 삭제 URL도 복사해두세요.</li>
+            </ol>
+            <h3 data-i18n="modalCautionTitle">⚠️ 주의사항</h3>
+            <ul>
+                <li data-i18n-html="modalCaution1">이 서비스는 <strong>보안 감사를 받지 않은</strong> 상태입니다. 중요한 파일은 본인 책임하에 사용하세요.</li>
+                <li data-i18n-html="modalCaution2">File Blossom은 <span style="color:red;">프론트엔드 코드를</span> 그대로 베껴가는 것을 <span style="color:red;">허용하지 않습니다.</span></li>
+            </ul>
+            <p style="margin-top:12px;font-size:12px;color:#484f58;" data-i18n-html="modalFooter">이용약관은 별도로 제공되지 않으며, 사용자는 본 서비스를 "있는 그대로" 사용하는 데 동의합니다.<br>Made By Areta<br><span>© Devareta Studio — 모든 권리 보유</span></p>
+        </div>
+    </div>
+
+    <script type="module">
+        // ============================================================
+        //  모든 JavaScript (ES Module, 브라우저 전용)
+        // ============================================================
+        let autoDeleteEnabled = false;
+        const autoDeleteToggle = document.getElementById('autoDeleteToggle');
+        const autoDeleteStatus = document.getElementById('autoDeleteStatus');
+
+        function toggleAutoDelete() {
+            autoDeleteEnabled = !autoDeleteEnabled;
+            autoDeleteToggle.classList.toggle('active', autoDeleteEnabled);
+            autoDeleteToggle.setAttribute('aria-checked', String(autoDeleteEnabled));
+            autoDeleteStatus.textContent = autoDeleteEnabled ? t('statusOn') : t('statusOff');
+            autoDeleteStatus.classList.toggle('active', autoDeleteEnabled);
+        }
+        autoDeleteToggle.addEventListener('click', toggleAutoDelete);
+        autoDeleteToggle.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleAutoDelete(); }
+        });
+        // ---------- 상수 ----------
+        const BLOSSOM_SERVERS = [
+            'https://cdn.hzrd149.com'
+        ];
+        const CHUNK_SIZE = 10 * 1024 * 1024;
+        const PNG_STUB = new Uint8Array([
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+            0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+            0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+            0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+            0x42, 0x60, 0x82
+        ]);
+
+        const NOSTR_RELAYS = [
+            'wss://relay.damus.io',
+            'wss://nos.lol',
+            'wss://relay.nostr.band'
+        ];
+
+        // ---------- 다국어 (i18n) ----------
+        const I18N = {
+            ko: {
+                subTagline: '암호화된 파일 공유 · Blossom 스토리지 · 종단간 암호화',
+                multiModeLabel: '멀티 모드',
+                statusOn: '활성',
+                statusOff: '비활성',
+                clickWord: '클릭',
+                uploadHintRest: '하여 파일 선택 또는 드래그앤드롭',
+                uploadModeHintDefault: '자동 분할 업로드 · AES-256-GCM 암호화',
+                uploadModeHintMulti: '멀티 모드: 여러 파일 선택 후 업로드 버튼 클릭',
+                selectedFiles: '선택된 파일들',
+                fileCountText: '{n}개',
+                removeBtnTitle: '제거',
+                compressAndUpload: '압축하여 업로드',
+                uploading: '업로드 중...',
+                preparing: '준비 중...',
+                chunkInfoText: '청크: {current} / {total}',
+                decryptTitle: '파일 복호화',
+                decryptDesc: '공유 링크를 붙여넣고 복호화 버튼을 누르세요',
+                decryptAndDownload: '복호화 및 다운로드',
+                termsLink: '이용약관 및 작동 원리',
+                modalTitle: '🌸 File Blossom 이용약관 및 작동 원리',
+                modalHowTitle: '🔐 작동 원리',
+                modalHowIntro: 'File Blossom은 <strong>클라이언트 사이드 암호화</strong>를 기반으로 하는 파일 공유 도구입니다.',
+                modalHow1: '<strong>암호화:</strong> 파일은 브라우저에서 <strong>AES-256-GCM</strong> 알고리즘으로 암호화됩니다. 암호화 키는 서버로 전송되지 않으며, URL 프래그먼트(#)에만 저장됩니다.',
+                modalHow2: '<strong>저장:</strong> 암호화된 파일은 <strong>Blossom</strong> 스토리지 서버에 분할 업로드됩니다. 파일은 SHA-256 해시로 주소 지정되며, 여러 서버에 미러링됩니다.',
+                modalHow3: '<strong>위장:</strong> 파일은 1x1 PNG 이미지 끝에 숨겨져서 <strong>PNG 스터빙</strong> 기법으로 전송됩니다.',
+                modalHow4: '<strong>공유:</strong> <strong>Nostr Gift-wrap</strong>을 통해 URL을 단축하여 안전하게 전달할 수 있습니다.',
+                modalUsageTitle: 'File Blossom 사용방법',
+                modalUsage1: '파일을 업로드합니다.',
+                modalUsage2: '공유 URL이 나오면 복사해주세요.',
+                modalUsage3: '나중에 삭제할 일이 생길 거 같으면 삭제 URL도 복사해두세요.',
+                modalCautionTitle: '⚠️ 주의사항',
+                modalCaution1: '이 서비스는 <strong>보안 감사를 받지 않은</strong> 상태입니다. 중요한 파일은 본인 책임하에 사용하세요.',
+                modalCaution2: 'File Blossom은 <span style="color:red;">프론트엔드 코드를</span> 그대로 베껴가는 것을 <span style="color:red;">허용하지 않습니다.</span>',
+                modalFooter: '이용약관은 별도로 제공되지 않으며, 사용자는 본 서비스를 "있는 그대로" 사용하는 데 동의합니다.<br>Made By Areta<br><span>© Devareta Studio — 모든 권리 보유</span>',
+                folderNotSupported: '❌ 폴더는 지원되지 않습니다. 파일만 선택해주세요.',
+                selectFilesAlert: '업로드할 파일을 선택하세요.',
+                zipFailTitle: '❌ 압축 실패',
+                readingFile: '파일 읽는 중...',
+                encrypting: '암호화 중 (AES-256-GCM)...',
+                encryptDone: '암호화 완료, PNG 위장 및 분할 준비 중...',
+                uploadingBlossom: 'Blossom에 분할 업로드 중...',
+                uploadingBlossomProgress: 'Blossom에 분할 업로드 중 {current}/{total}',
+                uploadDoneLinking: '업로드 완료, 링크 생성 중...',
+                shorteningNostr: 'Nostr 단축 중...',
+                allDone: '완료!',
+                uploadSuccess: '✅ 업로드 성공',
+                fileInfo: '파일: {name} ({size} KB)',
+                chunkCount: '청크: {count}개 (각 {mb}MB)',
+                shareUrl: '공유 URL',
+                copy: '복사',
+                eventIdLabel: '이벤트 ID: {id}',
+                downloadTxt: 'TXT 파일로 다운로드',
+                shortenedUrls: '단축된 공유 URL ({count}개)',
+                copyAllUrls: '모든 URL 복사',
+                shortenFailed: '⚠️ 단축 실패, 원본 URL 사용',
+                copied: '✅ 복사됨',
+                errorOccurred: '❌ 오류 발생',
+                noValidUrls: '❌ 유효한 URL이 없습니다.',
+                invalidShareLink: '유효하지 않은 공유 링크입니다.',
+                downloadingBlossom: '⏳ Blossom에서 파일 다운로드 중...',
+                decrypting: '⏳ 복호화 중...',
+                decryptDoneSize: '✅ 복호화 완료! ({mb} MB)',
+                fileTooBig: '파일이 큽니다 ({mb} MB)',
+                download: '다운로드',
+                downloadStarted: '✅ 다운로드 시작: {name}',
+                decryptFail: '❌ 복호화 실패: {err}',
+                urlTooLongSplit: '⚠️ URL이 너무 길어 분할이 필요합니다.',
+                splitDownloadTxt: 'URL 분할 다운로드 (txt)',
+                copyPartial: '복사 (부분)',
+                copiedPartial: '✅ 복사됨 (부분)',
+                splitDownloaded: '✅ {count}개로 분할되어 다운로드되었습니다.',
+                fileName: '파일명: {name}',
+                downloadComplete: '✅ 다운로드 완료',
+                downloadTxtShort: 'TXT 다운로드',
+                decryptDoneDownload: '✅ 복호화 및 다운로드 완료!',
+                fileInfoKb: '파일: {name} ({size} KB)',
+                enterUrlToDecrypt: '❌ 복호화할 URL을 입력하세요.',
+                noEventIdInUrl: '❌ URL에 이벤트 ID가 없습니다.',
+                noPrivateKeyInUrl: '❌ 복호화에 필요한 개인키(k)가 없습니다.',
+                keyDecodeFail: '❌ 개인키 디코딩 실패',
+                lookingUpEvent: '⏳ 릴레이에서 이벤트 {id}... 조회 중',
+                eventNotFound: '❌ 릴레이에서 이벤트를 찾을 수 없습니다.',
+                decryptSuccessRedirect: '✅ 복호화 성공! 원본 URL로 이동 중...',
+                originalUrlInvalid: '❌ 원본 URL이 유효하지 않습니다: {url}',
+                errorGeneric: '❌ 오류: {err}',
+                enterLink: '링크를 입력하세요.',
+                downloadingChunks: '⏳ Blossom에서 청크 다운로드 중...',
+                fileTooBigPackage: '파일이 큽니다 ({mb} MB)',
+                downloadFull: '다운로드',
+                downloadSplit: '분할 다운로드 (청크)',
+                downloadCompleteNamed: '✅ 다운로드 완료: {name} ({size} KB)',
+                nostrEventPrompt: 'Nostr 이벤트 ID: {id} - "복호화" 버튼을 누르세요.'
+            },
+            en: {
+                subTagline: 'Encrypted file sharing · Blossom storage · End-to-end encryption',
+                multiModeLabel: 'Multi mode',
+                statusOn: 'On',
+                statusOff: 'Off',
+                clickWord: 'Click',
+                uploadHintRest: ' to choose a file, or drag and drop',
+                uploadModeHintDefault: 'Automatic chunked upload · AES-256-GCM encryption',
+                uploadModeHintMulti: 'Multi mode: select files, then click the upload button',
+                selectedFiles: 'Selected files',
+                fileCountText: '{n}',
+                removeBtnTitle: 'Remove',
+                compressAndUpload: 'Zip and upload',
+                uploading: 'Uploading...',
+                preparing: 'Preparing...',
+                chunkInfoText: 'Chunks: {current} / {total}',
+                decryptTitle: 'Decrypt a file',
+                decryptDesc: 'Paste a share link and click decrypt',
+                decryptAndDownload: 'Decrypt and download',
+                termsLink: 'Terms & how it works',
+                modalTitle: '🌸 File Blossom — Terms & how it works',
+                modalHowTitle: '🔐 How it works',
+                modalHowIntro: 'File Blossom is a file-sharing tool built on <strong>client-side encryption</strong>.',
+                modalHow1: '<strong>Encryption:</strong> Files are encrypted in your browser with <strong>AES-256-GCM</strong>. The encryption key is never sent to a server — it only lives in the URL fragment (#).',
+                modalHow2: '<strong>Storage:</strong> Encrypted files are split and uploaded to <strong>Blossom</strong> storage servers. Files are addressed by SHA-256 hash and mirrored across multiple servers.',
+                modalHow3: '<strong>Disguise:</strong> Files are appended to the end of a 1x1 PNG image and transferred using a <strong>PNG stubbing</strong> technique.',
+                modalHow4: '<strong>Sharing:</strong> URLs can be shortened and delivered safely via <strong>Nostr Gift-wrap</strong>.',
+                modalUsageTitle: 'How to use File Blossom',
+                modalUsage1: 'Upload a file.',
+                modalUsage2: 'If a share URL appears, please copy it.',
+                modalUsage3: 'If you think you might need to delete it later, please also copy the delete URL.',
+                modalCautionTitle: '⚠️ Cautions',
+                modalCaution1: 'This service has <strong>not undergone a security audit</strong>. Use it for important files at your own risk.',
+                modalCaution2: 'File Blossom does <span style="color:red;">not permit</span> copying its <span style="color:red;">front-end code</span> as-is.',
+                modalFooter: 'No separate terms of service are provided; by using this service, you agree to use it "as is".<br>Made by Areta<br><span>© Devareta Studio — All rights reserved</span>',
+                folderNotSupported: '❌ Folders are not supported. Please select files only.',
+                selectFilesAlert: 'Select files to upload.',
+                zipFailTitle: '❌ Zip creation failed',
+                readingFile: 'Reading file...',
+                encrypting: 'Encrypting (AES-256-GCM)...',
+                encryptDone: 'Encryption done, preparing PNG disguise and split...',
+                uploadingBlossom: 'Uploading chunks to Blossom...',
+                uploadingBlossomProgress: 'Uploading chunks to Blossom {current}/{total}',
+                uploadDoneLinking: 'Upload complete, generating link...',
+                shorteningNostr: 'Shortening via Nostr...',
+                allDone: 'Done!',
+                uploadSuccess: '✅ Upload successful',
+                fileInfo: 'File: {name} ({size} KB)',
+                chunkCount: 'Chunks: {count} ({mb}MB each)',
+                shareUrl: 'Share URL',
+                copy: 'Copy',
+                eventIdLabel: 'Event ID: {id}',
+                downloadTxt: 'Download as TXT',
+                shortenedUrls: 'Shortened share URLs ({count})',
+                copyAllUrls: 'Copy all URLs',
+                shortenFailed: '⚠️ Shortening failed, using original URL',
+                copied: '✅ Copied',
+                errorOccurred: '❌ An error occurred',
+                combineFileReadFail: '❌ Failed to read file: {err}',
+                noValidUrls: '❌ No valid URLs.',
+                invalidShareLink: 'This is not a valid share link.',
+                downloadingBlossom: '⏳ Downloading file from Blossom...',
+                decrypting: '⏳ Decrypting...',
+                decryptDoneSize: '✅ Decryption complete! ({mb} MB)',
+                fileTooBig: 'This file is large ({mb} MB)',
+                download: 'Download',
+                downloadStarted: '✅ Download started: {name}',
+                decryptFail: '❌ Decryption failed: {err}',
+                combineUrlDone: '✅ URLs combined',
+                urlTooLongSplit: '⚠️ The URL is too long and needs to be split.',
+                splitDownloadTxt: 'Download split URL (txt)',
+                copyPartial: 'Copy (partial)',
+                copiedPartial: '✅ Copied (partial)',
+                splitDownloaded: '✅ Downloaded as {count} parts.',
+                fileName: 'Filename: {name}',
+                downloadComplete: '✅ Download complete',
+                downloadTxtShort: 'Download TXT',
+                decryptDoneDownload: '✅ Decryption and download complete!',
+                fileInfoKb: 'File: {name} ({size} KB)',
+                enterUrlToDecrypt: '❌ Enter a URL to decrypt.',
+                noEventIdInUrl: '❌ No event ID in this URL.',
+                noPrivateKeyInUrl: '❌ Missing the private key (k) needed to decrypt.',
+                keyDecodeFail: '❌ Failed to decode the private key',
+                lookingUpEvent: '⏳ Looking up event {id}... on relays',
+                eventNotFound: '❌ Event not found on any relay.',
+                decryptSuccessRedirect: '✅ Decrypted! Redirecting to the original URL...',
+                originalUrlInvalid: '❌ The original URL is invalid: {url}',
+                errorGeneric: '❌ Error: {err}',
+                enterLink: 'Enter a link.',
+                downloadingChunks: '⏳ Downloading chunks from Blossom...',
+                fileTooBigPackage: 'This file is large ({mb} MB)',
+                downloadFull: 'Download full file',
+                downloadSplit: 'Download split (chunks)',
+                downloadCompleteNamed: '✅ Download complete: {name} ({size} KB)',
+                nostrEventPrompt: 'Nostr event ID: {id} — click "Decrypt" to continue.'
+            }
+        };
+
+        let currentLang = (typeof localStorage !== 'undefined' && localStorage.getItem('fb_lang')) || 'ko';
+
+        function t(key, vars) {
+            const dict = I18N[currentLang] || I18N.ko;
+            let str = dict[key] !== undefined ? dict[key] : (I18N.ko[key] !== undefined ? I18N.ko[key] : key);
+            if (vars) {
+                for (const k in vars) {
+                    str = str.split(`{${k}}`).join(vars[k]);
+                }
+            }
+            return str;
+        }
+
+
+        function setLang(lang) {
+            currentLang = lang;
+            if (typeof localStorage !== 'undefined') localStorage.setItem('fb_lang', lang);
+            
+            document.documentElement.lang = currentLang;
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                el.textContent = t(el.getAttribute('data-i18n'));
+            });
+            document.querySelectorAll('[data-i18n-html]').forEach(el => {
+                el.innerHTML = t(el.getAttribute('data-i18n-html'));
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+            });
+            
+            document.getElementById('langKo')?.classList.toggle('active', currentLang === 'ko');
+            document.getElementById('langEn')?.classList.toggle('active', currentLang === 'en');
+            
+            const isMulti = typeof isMultiMode !== 'undefined' && isMultiMode;
+            document.getElementById('multiStatus').textContent = isMulti ? t('statusOn') : t('statusOff');
+            document.getElementById('uploadModeHint').textContent = isMulti ? t('uploadModeHintMulti') : t('uploadModeHintDefault');
+            
+            const dropStrong = dropZone?.querySelector('p strong');
+            const dropRest = dropZone?.querySelector('p span');
+            if (dropStrong) dropStrong.textContent = t('clickWord');
+            if (dropRest) dropRest.textContent = t('uploadHintRest');
+            
+            if (typeof renderFileList === 'function') renderFileList();
+        }
+        
+        document.getElementById('langKo')?.addEventListener('click', () => setLang('ko'));
+        document.getElementById('langEn')?.addEventListener('click', () => setLang('en'));
+
+        window.addEventListener('DOMContentLoaded', () => {
+            setLang(currentLang);
+        });
+        
+        // ---------- 유틸리티 ----------
+        function uint8ToHex(arr) {
+            return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function hexToUint8(hex) {
+            if (hex.length % 2 !== 0) throw new Error('Invalid hex length');
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes;
+        }
+
+        async function sha256(data) {
+            const hash = await crypto.subtle.digest('SHA-256', data);
+            return new Uint8Array(hash);
+        }
+
+        // ---------- 암호화 (파일명을 암호화 데이터에 포함) ----------
+        async function encryptFileWithName(file, autoDelete = false, deleteKeys = null) {
+            const fileData = new Uint8Array(await file.arrayBuffer());
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+
+            const metadata = JSON.stringify({
+                filename: file.name,
+                size: file.size,
+                type: file.type,
+                autoDelete: !!autoDelete,
+                deleteKeys: autoDelete && deleteKeys ? deleteKeys : null
+            });
+            const metadataBytes = new TextEncoder().encode(metadata);
+
+            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 기록
+            const metadataLengthBytes = new Uint8Array(4);
+            new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
+
+            const combined = new Uint8Array(4 + metadataBytes.length + fileData.length);
+            combined.set(metadataLengthBytes, 0);
+            combined.set(metadataBytes, 4);
+            combined.set(fileData, 4 + metadataBytes.length);
+
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
+            );
+            const encrypted = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                cryptoKey,
+                combined
+            );
+            return {
+                ciphertext: new Uint8Array(encrypted),
+                key,
+                iv
+            };
+        }
+        async function pregenerateDeleteKeys(totalChunks) {
+            const { generateSecretKey, getPublicKey } = await loadNostrTools();
+            const chunkAuthKeys = [];
+            for (let i = 0; i < totalChunks; i++) {
+                chunkAuthKeys.push(generateSecretKey());
+            }
+            const uploadAuthKey = chunkAuthKeys[0];
+            const uploadedPubkey = getPublicKey(uploadAuthKey);
+            return { uploadAuthKey, uploadedPubkey, chunkAuthKeys };
+        }
+        // ---------- 복호화 (파일명 복원) ----------
+        async function decryptFileWithName(ciphertext, key, iv) {
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
+            );
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv },
+                cryptoKey,
+                ciphertext
+            );
+            const combined = new Uint8Array(decrypted);
+
+            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 읽기
+            const metadataLength = new DataView(combined.buffer, combined.byteOffset, 4).getUint32(0, true);
+            const metadataBytes = combined.slice(4, 4 + metadataLength);
+            const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
+            const fileData = combined.slice(4 + metadataLength);
+
+            return {
+                filename: metadata.filename,
+                data: fileData,
+                size: metadata.size,
+                type: metadata.type,
+                autoDelete: !!metadata.autoDelete,
+                deleteKeys: metadata.deleteKeys || null
+            };
+        }
+
+        // ---------- PNG 스터빙 ----------
+        function embedInPNG(data) {
+            const combined = new Uint8Array(PNG_STUB.length + data.length);
+            combined.set(PNG_STUB, 0);
+            combined.set(data, PNG_STUB.length);
+            return combined;
+        }
+
+        function extractFromPNG(pngData) {
+            if (pngData.length < PNG_STUB.length) {
+                throw new Error('Invalid PNG stub');
+            }
+            for (let i = 0; i < PNG_STUB.length; i++) {
+                if (pngData[i] !== PNG_STUB[i]) {
+                    throw new Error('PNG stub mismatch');
+                }
+            }
+            return pngData.slice(PNG_STUB.length);
+        }
+
+        // ---------- 파일 분할/조립 ----------
+        function splitIntoChunks(data, chunkSize) {
+            const chunks = [];
+            for (let i = 0; i < data.length; i += chunkSize) {
+                chunks.push(data.slice(i, i + chunkSize));
+            }
+            return chunks;
+        }
+
+        function assembleChunks(chunks) {
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.length;
+            }
+            return result;
+        }
+
+        // ---------- Nostr 인증 ----------
+        async function loadNostrTools() {
+            const { generateSecretKey, getPublicKey, finalizeEvent, nip19, nip44 } = await import('https://cdn.jsdelivr.net/npm/nostr-tools@2.7.0/+esm');
+            return { generateSecretKey, getPublicKey, finalizeEvent, nip19, nip44 };
+        }
+
+        async function createAuthEvent(data, sk) {
+            const { getPublicKey, finalizeEvent } = await loadNostrTools();
+            
+            const pk = getPublicKey(sk);
+            const dataHash = await sha256(data);
+            const dataHashHex = uint8ToHex(dataHash);
+            const now = Math.floor(Date.now() / 1000);
+            const expiration = now + 300;
+            const event = {
+                kind: 24242,
+                pubkey: pk,
+                created_at: now,
+                tags: [
+                    ['t', 'upload'],
+                    ['x', dataHashHex],
+                    ['size', data.length.toString()],
+                    ['expiration', expiration.toString()]
+                ],
+                content: ''
+            };
+            
+            const signedEvent = await finalizeEvent(event, sk);
+            return signedEvent;
+        }
+
+        // ---------- 병렬 업로드 함수 (수정됨) ----------
+        async function uploadToBlossomParallel(data, onChunkProgress, pregenKeys = null) {
+            const chunks = splitIntoChunks(data, CHUNK_SIZE);
+            const chunkHashes = new Array(chunks.length);
+            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(chunks.length);
+            const totalChunks = chunks.length;
+            let uploadAuthKey = pregenKeys ? pregenKeys.uploadAuthKey : null;
+            let uploadedPubkey = pregenKeys ? pregenKeys.uploadedPubkey : null;
+
+            // 각 청크 업로드를 위한 개별 함수
+            async function uploadSingleChunk(index) {
+                const plainChunk = chunks[index];
+                const pngChunk = embedInPNG(plainChunk);
+                const hash = await sha256(pngChunk);
+                const hashHex = uint8ToHex(hash);
+                chunkHashes[index] = hashHex;
+
+                const { generateSecretKey, getPublicKey } = await loadNostrTools();
+                let tempSk = chunkAuthKeys[index];
+                if (!tempSk) {
+                    tempSk = generateSecretKey();
+                    chunkAuthKeys[index] = tempSk;
+                }
+                const tempPk = getPublicKey(tempSk);
+
+                if (index === 0 && !uploadAuthKey) {
+                    uploadAuthKey = tempSk;
+                    uploadedPubkey = tempPk;
+                }
+
+                const authEvent = await createAuthEvent(pngChunk, tempSk);
+                const authBase64 = btoa(JSON.stringify(authEvent));
+
+                let uploaded = false;
+                let lastError = null;
+
+                // 모든 서버에 순차적으로 시도 (첫 번째 성공 시 중단)
+                for (const server of BLOSSOM_SERVERS) {
+                    try {
+                        const resp = await fetch(`${server}/upload`, {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'image/png',
+                                'Authorization': `Nostr ${authBase64}`
+                            },
+                            body: pngChunk
+                        });
+                        if (!resp.ok) {
+                            const text = await resp.text();
+                            throw new Error(`HTTP ${resp.status}: ${text}`);
+                        }
+                        uploaded = true;
+                        break;
+                    } catch (err) {
+                        lastError = err;
+                        console.warn(`Server ${server} failed for chunk ${index}:`, err.message);
+                        // 실패 시 다음 서버로
+                    }
+                }
+                
+                if (!uploaded) {
+                    throw new Error(`청크 ${index} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
+                }
+
+                // 진행 상황 업데이트 (완료된 청크 수)
+                const completed = chunkHashes.filter(h => h !== undefined && h !== null).length;
+                if (onChunkProgress) {
+                    onChunkProgress(completed, totalChunks);
+                }
+                
+                return index;
+            }
+
+            // 청크 인덱스 배열 생성 (0부터 totalChunks-1까지)
+            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+            const results = [];
+
+            // ★★★ 하나씩 순차적으로 업로드 (병렬 없음) ★★★
+            for (let i = 0; i < chunkIndices.length; i++) {
+                const index = chunkIndices[i];
+                
+                try {
+                    await uploadSingleChunk(index);
+                    results.push(index);
+                } catch (err) {
+                    // 실패한 청크 재시도 (1회)
+                    console.warn(`Chunk ${index} failed, retrying...`, err);
+                    try {
+                        await uploadSingleChunk(index);
+                        results.push(index);
+                    } catch (retryErr) {
+                        throw new Error(`청크 ${index} 업로드 실패 (재시도): ${retryErr.message}`);
+                    }
+                }
+
+            }
+
+            // 모든 청크가 업로드되었는지 확인
+            for (let i = 0; i < chunkHashes.length; i++) {
+                if (!chunkHashes[i]) {
+                    throw new Error(`청크 ${i} 해시 누락`);
+                }
+            }
+
+            const fileHash = await sha256(data);
+            const fileHashHex = uint8ToHex(fileHash);
+
+            if (!uploadAuthKey) {
+                if (chunkAuthKeys.length > 0 && chunkAuthKeys[0]) {
+                    uploadAuthKey = chunkAuthKeys[0];
+                    const { getPublicKey } = await loadNostrTools();
+                    uploadedPubkey = getPublicKey(uploadAuthKey);
+                }
+            }
+
+            const result = {
+                success: true,
+                hash: fileHashHex,
+                chunkHashes: chunkHashes,
+                totalChunks: chunks.length,
+                server: BLOSSOM_SERVERS[0],
+                uploadAuthKey: uploadAuthKey,
+                uploadedPubkey: uploadedPubkey,
+                chunkAuthKeys: chunkAuthKeys
+            };
+
+            return result;
+        }
+
+        // ---------- 다운로드 ----------
+        async function downloadFromBlossom(hash, chunkHashes) {
+            const chunks = [];
+
+            for (let i = 0; i < chunkHashes.length; i++) {
+                const chunkHash = chunkHashes[i];
+                let pngData = null;
+
+                for (const server of BLOSSOM_SERVERS) {
+                    try {
+                        const resp = await fetch(`${server}/${chunkHash}`);
+                        if (!resp.ok) continue;
+
+                        const buffer = await resp.arrayBuffer();
+                        pngData = new Uint8Array(buffer);
+
+                        const computed = await sha256(pngData);
+                        if (uint8ToHex(computed) !== chunkHash) {
+                            console.warn(`Chunk hash mismatch from ${server}`);
+                            pngData = null;
+                            continue;
+                        }
+                        break;
+                    } catch (e) {
+                        console.warn(`Download chunk ${i} failed from ${server}:`, e.message);
+                    }
+                }
+
+                if (!pngData) {
+                    throw new Error(`청크 ${i} 다운로드 실패`);
+                }
+
+                const plainChunk = extractFromPNG(pngData);
+                chunks.push(plainChunk);
+            }
+
+            const data = assembleChunks(chunks);
+
+            const computedHash = await sha256(data);
+            if (uint8ToHex(computedHash) !== hash) {
+                throw new Error('전체 파일 해시 불일치');
+            }
+
+            return { data };
+        }
+
+        // ---------- Nostr Gift-wrap ----------
+        async function publishGiftWrap(link, recipientPubkey, senderPrivateKey) {
+            const { generateSecretKey, getPublicKey, finalizeEvent, nip44 } = await loadNostrTools();
+            
+            let senderSk = senderPrivateKey;
+            let senderPk;
+            if (senderSk) {
+                senderPk = getPublicKey(senderSk);
+            } else {
+                senderSk = generateSecretKey();
+                senderPk = getPublicKey(senderSk);
+            }
+            
+            const rumor = {
+                kind: 1,
+                content: link,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: []
+            };
+            
+            try {
+                const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
+                const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
+                
+                const giftWrapEvent = {
+                    kind: 1059,
+                    pubkey: senderPk,
+                    created_at: Math.floor(Date.now() / 1000),
+                    tags: [
+                        ['p', recipientPubkey]
+                    ],
+                    content: encryptedContent
+                };
+                
+                const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
+                
+                const results = [];
+                for (const relay of NOSTR_RELAYS) {
+                    try {
+                        const ws = new WebSocket(relay);
+                        await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => {
+                                ws.close();
+                                reject(new Error('Timeout'));
+                            }, 5000);
+                            
+                            ws.onopen = () => {
+                                ws.send(JSON.stringify(['EVENT', signedEvent]));
+                                clearTimeout(timeout);
+                                resolve();
+                            };
+                            ws.onerror = () => {
+                                clearTimeout(timeout);
+                                reject(new Error(`Relay ${relay} failed`));
+                            };
+                        });
+                        results.push({ relay, success: true });
+                    } catch (err) {
+                        results.push({ relay, success: false, error: err.message });
+                    }
+                }
+                
+                return {
+                    eventId: signedEvent.id,
+                    success: results.some(r => r.success),
+                    results
+                };
+            } catch (err) {
+                console.error('NIP-44 encryption failed:', err);
+                throw new Error(`암호화 실패: ${err.message}`);
+            }
+        }
+
+        // ---------- 공유 링크 (파일명 제외) ----------
+        function createShareLink(hash, key, iv, chunkHashes) {
+            const keyHex = uint8ToHex(key);
+            const ivHex = uint8ToHex(iv);
+            const chunkHashesStr = chunkHashes.join(',');
+            return `${window.location.origin}${window.location.pathname}#${hash},${keyHex},${ivHex},${chunkHashesStr}`;
+        }
+
+        function parseShareLink(url) {
+            try {
+                const hash = url.split('#')[1];
+                if (!hash) return null;
+                const parts = hash.split(',');
+                if (parts.length < 4) return null;
+                return {
+                    hash: parts[0],
+                    key: hexToUint8(parts[1]),
+                    iv: hexToUint8(parts[2]),
+                    chunkHashes: parts.slice(3)
+                };
+            } catch {
+                return null;
+            }
+        }
+
+        // ---------- Base64 인코딩/디코딩 ----------
+        function decodeFromBase64ToUtf8(base64) {
+            let b64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4) b64 += '=';
+            const binary = atob(b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return new TextDecoder().decode(bytes);
+        }
+        function encodeToBase64(hex) {
+            try {
+                let bytes;
+                if (hex instanceof Uint8Array) {
+                    bytes = hex;
+                } else if (typeof hex === 'string') {
+                    // ★★★ 문자열인 경우 UTF-8로 인코딩 ★★★
+                    try {
+                        // JSON 문자열인지 확인
+                        JSON.parse(hex);
+                        // JSON이면 UTF-8로 인코딩
+                        const encoder = new TextEncoder();
+                        bytes = encoder.encode(hex);
+                    } catch {
+                        // hex 문자열인 경우
+                        if (/^[0-9a-fA-F]+$/.test(hex) && hex.length % 2 === 0) {
+                            bytes = new Uint8Array(hex.length / 2);
+                            for (let i = 0; i < hex.length; i += 2) {
+                                bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+                            }
+                        } else {
+                            // 일반 문자열
+                            const encoder = new TextEncoder();
+                            bytes = encoder.encode(hex);
+                        }
+                    }
+                } else {
+                    return null;
+                }
+                const base64 = btoa(String.fromCharCode(...bytes));
+                return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+            } catch (e) {
+                console.error('encodeToBase64 error:', e);
+                return null;
+            }
+        }
+
+        function decodeFromBase64(base64) {
+            try {
+                // Base64 URL-safe 디코딩
+                let b64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+                while (b64.length % 4) b64 += '=';
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    bytes[i] = binary.charCodeAt(i);
+                }
+                // bytes를 hex 문자열로 변환
+                const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                console.log('decodeFromBase64 result:', { base64, hex, length: hex.length });
+                return hex;
+            } catch (e) {
+                console.error('decodeFromBase64 error:', e);
+                return null;
+            }
+        }
+
+
+
+        // ---------- UI 핸들링 ----------
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const progressWrap = document.getElementById('progressWrap');
+        const progressFill = document.getElementById('progressFill');
+        const progressLabel = document.getElementById('progressLabel');
+        const progressPercent = document.getElementById('progressPercent');
+        const chunkInfo = document.getElementById('chunkInfo');
+        const resultBox = document.getElementById('resultBox');
+        const resultContent = document.getElementById('resultContent');
+        const shareLinkInput = document.getElementById('shareLinkInput');
+        const decryptBtn = document.getElementById('decryptBtn');
+        const decryptResult = document.getElementById('decryptResult');
+        const termsLink = document.getElementById('termsLink');
+        const termsModal = document.getElementById('termsModal');
+        const modalCloseBtn = document.getElementById('modalCloseBtn');
+        const multiToggle = document.getElementById('multiToggle');
+        const multiStatus = document.getElementById('multiStatus');
+        const multiUploadBtn = document.getElementById('multiUploadBtn');
+        const fileListPreview = document.getElementById('fileListPreview');
+        const fileListItems = document.getElementById('fileListItems');
+        const uploadModeHint = document.getElementById('uploadModeHint');
+
+        let currentShareLink = '';
+        let currentFilename = '';
+        let isProcessing = false;
+        let isMultiMode = false;
+        let selectedFiles = [];
+        let multiFileData = [];
+        fileInput.removeAttribute('webkitdirectory');
+        fileInput.multiple = false;
+
+        // ---------- 멀티 모드 토글 ----------
+        function toggleMultiMode() {
+            isMultiMode = !isMultiMode;
+            multiToggle.classList.toggle('active', isMultiMode);
+            multiToggle.setAttribute('aria-checked', String(isMultiMode));
+            multiStatus.textContent = isMultiMode ? t('statusOn') : t('statusOff');
+            multiStatus.classList.toggle('active', isMultiMode);
+            multiUploadBtn.classList.toggle('visible', isMultiMode);
+            fileListPreview.classList.toggle('visible', isMultiMode);
+            uploadModeHint.textContent = isMultiMode ? t('uploadModeHintMulti') : t('uploadModeHintDefault');
+
+            if (!isMultiMode) {
+                selectedFiles = [];
+                multiFileData = [];
+                fileListItems.innerHTML = '';
+                fileListPreview.classList.remove('visible');
+                multiUploadBtn.classList.remove('visible');
+                document.getElementById('fileCount').textContent = t('fileCountText', { n: 0 });
+                fileInput.multiple = false;
+                fileInput.removeAttribute('webkitdirectory');
+            } else {
+                fileInput.multiple = true;
+                fileInput.removeAttribute('webkitdirectory');
+            }
+            fileInput.value = '';
+            const dropRest = dropZone.querySelector('p span');
+            if (dropRest) dropRest.textContent = isMultiMode ? t('uploadHintRest') : t('uploadHintRest');
+        }
+        multiToggle.addEventListener('click', toggleMultiMode);
+        multiToggle.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMultiMode(); }
+        });
+
+        // ---------- 파일 선택 처리 ----------
+        fileInput.addEventListener('change', (e) => {
+            if (!isMultiMode) {
+                if (e.target.files.length > 0) {
+                    handleFile(e.target.files[0]);
+                }
+                fileInput.value = '';
+                return;
+            }
+
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+
+            const filePromises = files.map(file => {
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        resolve({
+                            name: file.name,
+                            path: file.name,
+                            size: file.size,
+                            type: file.type,
+                            data: new Uint8Array(ev.target.result),
+                            file: file
+                        });
+                    };
+                    reader.readAsArrayBuffer(file);
+                });
+            });
+
+            Promise.all(filePromises).then(results => {
+                multiFileData = multiFileData.concat(results);
+                selectedFiles = multiFileData.map(r => r.file);
+                renderFileList();
+            });
+            
+            fileInput.value = '';
+        });
+
+
+        function renderFileList() {
+            if (multiFileData.length === 0) {
+                fileListItems.innerHTML = '';
+                fileListPreview.classList.remove('visible');
+                document.getElementById('fileCount').textContent = t('fileCountText', { n: 0 });
+                multiUploadBtn.classList.remove('visible');
+                return;
+            }
+            
+            fileListItems.innerHTML = multiFileData.map((f, index) => `
+                <div class="file-item" data-index="${index}">
+                    <span>${f.path}</span>
+                    <span style="display:flex;align-items:center;gap:8px;">
+                        <span class="size">${(f.size / 1024).toFixed(1)} KB</span>
+                        <button class="remove-btn" data-index="${index}" title="${t('removeBtnTitle')}">✕</button>
+                    </span>
+                </div>
+            `).join('');
+            
+            fileListPreview.classList.add('visible');
+            document.getElementById('fileCount').textContent = t('fileCountText', { n: multiFileData.length });
+            multiUploadBtn.classList.add('visible');
+            
+            document.querySelectorAll('.remove-btn').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const index = parseInt(btn.dataset.index);
+                    removeFileFromList(index);
+                });
+            });
+        }
+
+        // ---------- 파일 리스트에서 제거 함수 ----------
+        function removeFileFromList(index) {
+            multiFileData.splice(index, 1);
+            selectedFiles.splice(index, 1);
+            renderFileList();
+            fileInput.value = '';
+        }
+
+        // ---------- 드래그 앤 드롭 ----------
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            
+            const items = e.dataTransfer.items;
+            if (!items) return;
+
+            if (!isMultiMode) {
+                const file = e.dataTransfer.files[0];
+                if (file) handleFile(file);
+                return;
+            }
+
+            const files = [];
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.kind === 'file') {
+                    const file = item.getAsFile();
+                    if (file) {
+                        file.path = file.name;
+                        files.push(file);
+                    }
+                }
+            }
+
+            if (files.length === 0) {
+                showResult(t('folderNotSupported'), true);
+                return;
+            }
+
+            const readPromises = files.map(file => {
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (ev) => {
+                        resolve({
+                            name: file.name,
+                            path: file.name,
+                            size: file.size,
+                            type: file.type,
+                            data: new Uint8Array(ev.target.result),
+                            file: file
+                        });
+                    };
+                    reader.readAsArrayBuffer(file);
+                });
+            });
+
+            Promise.all(readPromises).then(results => {
+                multiFileData = multiFileData.concat(results);
+                selectedFiles = multiFileData.map(r => r.file);
+                renderFileList();
+            });
+        });
+
+        // ---------- 멀티 업로드 ----------
+        multiUploadBtn.addEventListener('click', async () => {
+            if (multiFileData.length === 0) {
+                alert(t('selectFilesAlert'));
+                return;
+            }
+            multiUploadBtn.disabled = true;
+            multiUploadBtn.textContent = t('uploading');
+            try {
+                const JSZip = (await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')).default;
+                const zip = new JSZip();
+                
+                for (const f of multiFileData) {
+                    zip.file(f.path, f.data);
+                }
+                
+                const zipBlob = await zip.generateAsync({ type: 'blob' });
+                const zipFileName = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5) + '.zip';
+                const zipFile = new File([zipBlob], zipFileName, { type: 'application/zip' });
+                
+                await handleFile(zipFile);
+                
+                selectedFiles = [];
+                multiFileData = [];
+                fileListItems.innerHTML = '';
+                fileListPreview.classList.remove('visible');
+                multiUploadBtn.classList.remove('visible');
+                fileInput.value = '';
+            } catch (err) {
+                console.error('Zip creation failed:', err);
+                showResult(`
+                    <div class="text-red">${t('zipFailTitle')}</div>
+                    <div style="font-size:13px;margin-top:6px;color:#8b949e;">${err.message}</div>
+                `, true);
+            } finally {
+                multiUploadBtn.disabled = false;
+                multiUploadBtn.textContent = t('compressAndUpload');
+            }
+        });
+        
+
+        // 삭제 전용 Base64 디코딩 함수 (Uint8Array 반환)
+        function decodeFromBase64ToBytes(base64) {
+            if (!base64) return null;
+            
+            try {
+                // Base64 URL-safe 디코딩
+                let b64 = base64.replace(/-/g, '+').replace(/_/g, '/');
+                
+                // 패딩 추가
+                while (b64.length % 4) b64 += '=';
+                
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) {
+                    bytes[i] = binary.charCodeAt(i);
+                }
+                return bytes;
+            } catch (e) {
+                console.error('decodeFromBase64ToBytes error:', e, 'input:', base64);
+                
+                // 이미 hex 문자열인 경우 처리
+                if (typeof base64 === 'string' && /^[0-9a-fA-F]+$/.test(base64)) {
+                    const hex = base64;
+                    const bytes = new Uint8Array(hex.length / 2);
+                    for (let i = 0; i < hex.length; i += 2) {
+                        bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+                    }
+                    return bytes;
+                }
+                
+                return null;
+            }
+        }
+
+        
+
+        // ---------- 삭제 함수 (프론트엔드 직접 실행) - 최종 수정됨 ----------
+        async function handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey) {
+            if (!eventId || !privateKey) {
+                alert('Error: Missing event ID or private key');
+                return;
+            }
+
+            showDecryptResult('Decrypting delete request...', false);
+
+            try {
+                const nostrTools = await loadNostrTools();
+                const { getPublicKey, finalizeEvent, nip44 } = nostrTools;
+
+                const event = await fetchEventFromRelays(eventId);
+                if (!event) {
+                    showDecryptResult('Event not found on relays.', true);
+                    alert('Error: Could not find the delete URL event on relays');
+                    return;
+                }
+                
+                // keyHex 추출 (모든 타입 처리)
+                let keyHex = null;
+                try {
+                    // 1. Uint8Array 체크
+                    if (privateKey instanceof Uint8Array) {
+                        keyHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('');
+                        console.log('Converted Uint8Array to hex:', keyHex.substring(0, 16) + '...');
+                    }
+                    // 2. 일반 배열 체크 (숫자 배열)
+                    else if (Array.isArray(privateKey) && privateKey.every(v => typeof v === 'number' && v >= 0 && v <= 255)) {
+                        keyHex = privateKey.map(b => b.toString(16).padStart(2, '0')).join('');
+                        console.log('Converted number array to hex:', keyHex.substring(0, 16) + '...');
+                    }
+                    // 3. 문자열 체크
+                    else if (typeof privateKey === 'string') {
+                        // 이미 hex 형식인지 확인
+                        if (privateKey.length === 64 && /^[0-9a-fA-F]+$/.test(privateKey)) {
+                            keyHex = privateKey;
+                        } else {
+                            // Base64 디코딩 시도
+                            try {
+                                const bytes = decodeFromBase64ToBytes(privateKey);
+                                if (bytes) {
+                                    keyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                                }
+                            } catch (e) {
+                                console.warn('Base64 decode failed, trying as-is:', e);
+                            }
+                            
+                            // 그래도 안되면 원본 사용 (혹시 hex인 경우)
+                            if (!keyHex && privateKey.length === 64) {
+                                keyHex = privateKey;
+                            }
+                        }
+                    }
+                    // 4. 객체인 경우 (Uint8Array가 아닌 다른 형태)
+                    else if (privateKey && typeof privateKey === 'object') {
+                        // ArrayBuffer나 다른 형태일 수 있음
+                        try {
+                            const bytes = new Uint8Array(privateKey);
+                            keyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                            console.log('Converted object to hex:', keyHex.substring(0, 16) + '...');
+                        } catch (e) {
+                            console.warn('Failed to convert object to hex:', e);
+                        }
+                    }
+                } catch (e) {
+                    console.error('Failed to extract keyHex:', e);
+                    showDecryptResult('Invalid private key format.', true);
+                    alert('Error: Invalid private key format');
+                    return;
+                }
+                
+                if (!keyHex || keyHex.length !== 64) {
+                    showDecryptResult('Invalid private key (must be 64 hex chars).', true);
+                    alert('Error: Invalid private key');
+                    return;
+                }
+                
+                const recipientPk = getPublicKey(keyHex);
+                const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                const decrypted = nip44.decrypt(event.content, conversationKey);
+                const rumor = JSON.parse(decrypted);
+                const deleteUrl = rumor.content;
+                
+                const urlObj = new URL(deleteUrl);
+                const metadataEncoded = urlObj.searchParams.get('m');
+                
+                if (!metadataEncoded) {
+                    showDecryptResult('No metadata found in delete URL.', true);
+                    alert('Error: No metadata found');
+                    return;
+                }
+                
+                let metadataJson;
+                try {
+                    let b64 = metadataEncoded.replace(/-/g, '+').replace(/_/g, '/');
+                    while (b64.length % 4) b64 += '=';
+                    const binary = atob(b64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) {
+                        bytes[i] = binary.charCodeAt(i);
+                    }
+                    metadataJson = new TextDecoder().decode(bytes);
+                } catch (e) {
+                    showDecryptResult('Failed to decode metadata.', true);
+                    alert('Error: Failed to decode metadata');
+                    return;
+                }
+                
+                let metadata;
+                try {
+                    metadata = JSON.parse(metadataJson);
+                } catch (e) {
+                    showDecryptResult('Failed to parse metadata JSON.', true);
+                    alert('Error: Failed to parse metadata');
+                    return;
+                }
+                
+                const fileHashToDelete = metadata.fileHash || fileHash;
+                const chunkHashes = metadata.chunkHashes || allChunkHashes || [];
+                const uploadAuthKeyHex = metadata.uploadAuthKey ? 
+                    (Array.isArray(metadata.uploadAuthKey) ? 
+                        Array.from(metadata.uploadAuthKey).map(b => b.toString(16).padStart(2, '0')).join('') : 
+                        metadata.uploadAuthKey) : 
+                    (uploadAuthKey ? (uploadAuthKey instanceof Uint8Array ? 
+                        Array.from(uploadAuthKey).map(b => b.toString(16).padStart(2, '0')).join('') : 
+                        uploadAuthKey) : null);
+                const chunkAuthKeysHex = metadata.chunkAuthKeys ? 
+                    metadata.chunkAuthKeys.map(key => {
+                        if (Array.isArray(key)) {
+                            return Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('');
+                        }
+                        return key;
+                    }).filter(key => key !== null) : 
+                    (chunkAuthKeys ? chunkAuthKeys.map(key => 
+                        key instanceof Uint8Array ? 
+                            Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('') : 
+                            key
+                    ).filter(key => key !== null) : null);
+                const uploadedPubkeyHex = metadata.uploadedPubkey || uploadedPubkey || null;
+                
+                const shareEventId = metadata.shareEventId;
+                const sharePrivateKey = metadata.sharePrivateKey;
+                
+                let message = 'Are you sure you want to delete this shared link?\n\n';
+                if (chunkHashes.length > 0) {
+                    message += `${chunkHashes.length} file chunk(s) will be deleted from Blossom servers.\n`;
+                }
+                if (fileHashToDelete) {
+                    message += `File hash: ${fileHashToDelete.substring(0, 16)}...\n`;
+                }
+                if (shareEventId) {
+                    message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
+                }
+                message += '\nThis action cannot be undone.';
+
+                if (!confirm(message)) {
+                    showDecryptResult('Delete cancelled.', true);
+                    return;
+                }
+
+                showDecryptResult('Deleting files... (this may take a few seconds)', false);
+
+                async function createBlossomAuthEvent(authKey, hash, pubkey) {
+                    if (!authKey) return null;
+
+                    let authSk;
+                    if (typeof authKey === 'string') {
+                        const bytes = new Uint8Array(authKey.length / 2);
+                        for (let i = 0; i < authKey.length; i += 2) {
+                            bytes[i / 2] = parseInt(authKey.substring(i, i + 2), 16);
+                        }
+                        authSk = bytes;
+                    } else if (authKey instanceof Uint8Array) {
+                        authSk = authKey;
+                    } else if (Array.isArray(authKey)) {
+                        authSk = new Uint8Array(authKey);
+                    } else {
+                        return null;
+                    }
+
+                    let authPk = pubkey;
+                    if (!authPk) {
+                        authPk = getPublicKey(authSk);
+                    }
+                    const now = Math.floor(Date.now() / 1000);
+
+                    const authEvent = {
+                        kind: 24242,
+                        pubkey: authPk,
+                        created_at: now,
+                        tags: [
+                            ['t', 'delete'],
+                            ['x', hash],
+                            ['expiration', (now + 300).toString()]
+                        ],
+                        content: 'Delete Blob'
+                    };
+
+                    return await finalizeEvent(authEvent, authSk);
+                }
+
+                // 모든 릴레이에 삭제 이벤트 전송
+                async function sendDeleteEventToAllRelays(eventIdToDelete, skHex) {
+                    if (!eventIdToDelete || !skHex) return false;
+
+                    try {
+                        const sk = hexToUint8(skHex);
+                        if (!sk) return false;
+
+                        const pubkey = getPublicKey(sk);
+                        const now = Math.floor(Date.now() / 1000);
+
+                        const deleteEvent = {
+                            kind: 5,
+                            pubkey: pubkey,
+                            created_at: now,
+                            tags: [
+                                ['e', eventIdToDelete]
+                            ],
+                            content: ''
+                        };
+
+                        const signedDeleteEvent = await finalizeEvent(deleteEvent, sk);
+                        let sentCount = 0;
+
+                        for (const relay of NOSTR_RELAYS) {
+                            try {
+                                const ws = new WebSocket(relay);
+                                await new Promise((resolve) => {
+                                    const timeout = setTimeout(() => {
+                                        ws.close();
+                                        resolve();
+                                    }, 5000);
+
+                                    ws.onopen = () => {
+                                        ws.send(JSON.stringify(['EVENT', signedDeleteEvent]));
+                                        setTimeout(() => {
+                                            clearTimeout(timeout);
+                                            resolve();
+                                            ws.close();
+                                        }, 1000);
+                                    };
+
+                                    ws.onerror = () => {
+                                        clearTimeout(timeout);
+                                        resolve();
+                                    };
+                                });
+                                sentCount++;
+                            } catch (e) {
+                                // Silently continue
+                            }
+                        }
+
+                        return sentCount > 0;
+                    } catch (e) {
+                        return false;
+                    }
+                }
+
+                const blossomServers = BLOSSOM_SERVERS;
+                const authKeyToUse = uploadAuthKeyHex || (chunkAuthKeysHex && chunkAuthKeysHex.length > 0 ? chunkAuthKeysHex[0] : null);
+                const pubkeyToUse = uploadedPubkeyHex || null;
+
+                let blossomDeleted = 0;
+                let blossomFailed = 0;
+
+                // 1. Blossom 파일 삭제
+                if (authKeyToUse && chunkHashes.length > 0) {
+                    for (let i = 0; i < chunkHashes.length; i++) {
+                        const chunkHash = chunkHashes[i];
+                        let chunkAuthKey = authKeyToUse;
+                        if (chunkAuthKeysHex && chunkAuthKeysHex.length > i && chunkAuthKeysHex[i]) {
+                            chunkAuthKey = chunkAuthKeysHex[i];
+                        }
+
+                        let deletedFromAny = false;
+
+                        for (const server of blossomServers) {
+                            try {
+                                const headResponse = await fetch(`${server}/${chunkHash}`, { method: 'HEAD' });
+                                if (headResponse.status === 404) continue;
+
+                                const authEvent = await createBlossomAuthEvent(chunkAuthKey, chunkHash, pubkeyToUse);
+                                if (!authEvent) continue;
+
+                                const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
+                                const deleteResponse = await fetch(`${server}/${chunkHash}`, {
+                                    method: 'DELETE',
+                                    headers: { 'Authorization': authHeader }
+                                });
+
+                                if (deleteResponse.ok || deleteResponse.status === 204) {
+                                    deletedFromAny = true;
+                                    break;
+                                }
+                            } catch (e) {
+                                // Silently continue
+                            }
+                        }
+
+                        if (deletedFromAny) {
+                            blossomDeleted++;
+                        } else {
+                            blossomFailed++;
+                        }
+                    }
+                }
+
+                // 2. 공유 URL Nostr 이벤트 삭제
+                let shareDeleted = false;
+                if (shareEventId && sharePrivateKey) {
+                    showDecryptResult('Deleting share URL from Nostr...', false);
+                    
+                    let shareKeyHex = null;
+                    try {
+                        if (sharePrivateKey instanceof Uint8Array) {
+                            shareKeyHex = Array.from(sharePrivateKey).map(b => b.toString(16).padStart(2, '0')).join('');
+                        } else if (Array.isArray(sharePrivateKey)) {
+                            shareKeyHex = sharePrivateKey.map(b => b.toString(16).padStart(2, '0')).join('');
+                        } else if (typeof sharePrivateKey === 'string') {
+                            if (sharePrivateKey.length === 64 && /^[0-9a-fA-F]+$/.test(sharePrivateKey)) {
+                                shareKeyHex = sharePrivateKey;
+                            } else {
+                                const bytes = decodeFromBase64ToBytes(sharePrivateKey);
+                                if (bytes) {
+                                    shareKeyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                                }
+                                if (!shareKeyHex && sharePrivateKey.length === 64) {
+                                    shareKeyHex = sharePrivateKey;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.warn('Failed to decode share private key:', e);
+                    }
+                    
+                    if (shareKeyHex && shareKeyHex.length === 64) {
+                        shareDeleted = await sendDeleteEventToAllRelays(shareEventId, shareKeyHex);
+                    }
+                }
+
+                // 3. delete URL Nostr 이벤트 삭제
+                let deleteUrlDeleted = false;
+                if (eventId && keyHex) {
+                    showDecryptResult('Deleting delete URL from Nostr...', false);
+                    deleteUrlDeleted = await sendDeleteEventToAllRelays(eventId, keyHex);
+                }
+
+                // 4. 현재 URL의 추가 이벤트들도 삭제
+                try {
+                    const currentUrlObj = new URL(window.location.href);
+                    
+                    const currentEncodedId = currentUrlObj.searchParams.get('id');
+                    if (currentEncodedId) {
+                        const currentEventId = decodeFromBase64(currentEncodedId);
+                        if (currentEventId && currentEventId !== shareEventId && currentEventId !== eventId) {
+                            const currentKey = currentUrlObj.searchParams.get('k');
+                            if (currentKey) {
+                                let currentKeyHex = null;
+                                try {
+                                    if (currentKey instanceof Uint8Array) {
+                                        currentKeyHex = Array.from(currentKey).map(b => b.toString(16).padStart(2, '0')).join('');
+                                    } else if (Array.isArray(currentKey)) {
+                                        currentKeyHex = currentKey.map(b => b.toString(16).padStart(2, '0')).join('');
+                                    } else {
+                                        const bytes = decodeFromBase64ToBytes(currentKey);
+                                        if (bytes) {
+                                            currentKeyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                                        }
+                                        if (!currentKeyHex && typeof currentKey === 'string' && currentKey.length === 64) {
+                                            currentKeyHex = currentKey;
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to decode current key:', e);
+                                }
+                                if (currentKeyHex && currentKeyHex.length === 64) {
+                                    await sendDeleteEventToAllRelays(currentEventId, currentKeyHex);
+                                }
+                            }
+                        }
+                    }
+                    
+                    
+                } catch (e) {
+                    // Silently continue
+                }
+
+                // 결과 표시
+                let resultMsg = '';
+                if (blossomDeleted > 0 && (shareDeleted || deleteUrlDeleted)) {
+                    resultMsg = '✅ File and share URL deleted successfully!';
+                    showDecryptResult(resultMsg, false);
+                    alert(resultMsg);
+                } else if (blossomDeleted > 0) {
+                    resultMsg = '⚠️ File deleted from Blossom.\n\n' +
+                            'Share URL deletion was attempted but may not work on all relays.\n' +
+                            'The file is no longer accessible, but the link may still exist.';
+                    showDecryptResult(resultMsg, true);
+                    alert(resultMsg);
+                } else {
+                    resultMsg = '❌ Delete failed. Please try again.';
+                    showDecryptResult(resultMsg, true);
+                    alert(resultMsg);
+                }
+
+            } catch (err) {
+                const errorMsg = `Delete failed: ${err.message}`;
+                showDecryptResult(errorMsg, true);
+                alert(errorMsg);
+                console.error(err);
+            }
+        }
+        // toUint8Array 함수 (프론트엔드에서 사용)
+        function toUint8Array(key) {
+            if (!key) return null;
+            if (key instanceof Uint8Array) return key;
+            if (typeof key === 'string') {
+                if (key.length === 64 && /^[0-9a-fA-F]+$/.test(key)) {
+                    const bytes = new Uint8Array(key.length / 2);
+                    for (let i = 0; i < key.length; i += 2) {
+                        bytes[i / 2] = parseInt(key.substring(i, i + 2), 16);
+                    }
+                    return bytes;
+                }
+                try {
+                    // ★★★ Buffer 대신 atob 사용 ★★★
+                    const binary = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) {
+                        bytes[i] = binary.charCodeAt(i);
+                    }
+                    return bytes;
+                } catch (e) {
+                    return null;
+                }
+            }
+            return null;
+        }
+        async function selfDeleteAfterDownload(uploadResult) {
+            try {
+                const nostrTools = await loadNostrTools();
+                const { getPublicKey, finalizeEvent } = nostrTools;
+
+                const authKeyToUse = uploadResult.uploadAuthKey ||
+                    (uploadResult.chunkAuthKeys && uploadResult.chunkAuthKeys.length > 0 ? uploadResult.chunkAuthKeys[0] : null);
+                const pubkeyToUse = uploadResult.uploadedPubkey || null;
+                const chunkHashes = uploadResult.chunkHashes || [];
+                const chunkAuthKeys = uploadResult.chunkAuthKeys || [];
+
+                async function createBlossomAuthEvent(authKey, hash, pubkey) {
+                    if (!authKey) return null;
+                    let authSk = authKey instanceof Uint8Array ? authKey : toUint8Array(authKey);
+                    if (!authSk) return null;
+                    let authPk = pubkey || getPublicKey(authSk);
+                    const now = Math.floor(Date.now() / 1000);
+                    const authEvent = {
+                        kind: 24242,
+                        pubkey: authPk,
+                        created_at: now,
+                        tags: [
+                            ['t', 'delete'],
+                            ['x', hash],
+                            ['expiration', (now + 300).toString()]
+                        ],
+                        content: ''
+                    };
+                    return await finalizeEvent(authEvent, authSk);
+                }
+
+                const blossomServers = BLOSSOM_SERVERS;
+
+                for (let i = 0; i < chunkHashes.length; i++) {
+                    const chunkHash = chunkHashes[i];
+                    let chunkAuthKey = authKeyToUse;
+                    if (chunkAuthKeys.length > i && chunkAuthKeys[i]) {
+                        chunkAuthKey = chunkAuthKeys[i];
+                    }
+
+                    for (const server of blossomServers) {
+                        try {
+                            const headResp = await fetch(`${server}/${chunkHash}`, { method: 'HEAD' });
+                            if (headResp.status === 404) continue;
+
+                            const authEvent = await createBlossomAuthEvent(chunkAuthKey, chunkHash, pubkeyToUse);
+                            if (!authEvent) continue;
+
+                            const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
+                            await fetch(`${server}/${chunkHash}`, {
+                                method: 'DELETE',
+                                headers: { 'Authorization': authHeader }
+                            });
+                        } catch (e) {
+                            // Silently continue on failure per-server
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Auto-delete after download failed:', err);
+            }
+        }
+        async function deleteBlossomFiles(uploadAuthKey, chunkAuthKeys, chunkHashes, fileHash, uploadedPubkey) {
+            try {
+                const nostrTools = await loadNostrTools();
+                const { getPublicKey, finalizeEvent } = nostrTools;
+
+                async function createBlossomAuthEvent(authKey, hash, pubkey) {
+                    if (!authKey) return null;
+                    let authSk = authKey instanceof Uint8Array ? authKey : toUint8Array(authKey);
+                    if (!authSk) return null;
+                    let authPk = pubkey || getPublicKey(authSk);
+                    const now = Math.floor(Date.now() / 1000);
+                    const authEvent = {
+                        kind: 24242,
+                        pubkey: authPk,
+                        created_at: now,
+                        tags: [
+                            ['t', 'delete'],
+                            ['x', hash],
+                            ['expiration', (now + 300).toString()]
+                        ],
+                        content: 'Delete Blob' // ★ 빈 문자열 방지
+                    };
+                    return await finalizeEvent(authEvent, authSk);
+                }
+
+                const blossomServers = BLOSSOM_SERVERS; // ★ primal / 24242.io 목록 그대로 사용
+                const authKeyToUse = uploadAuthKey ||
+                    (chunkAuthKeys && chunkAuthKeys.length > 0 ? chunkAuthKeys[0] : null);
+                const pubkeyToUse = uploadedPubkey || null;
+
+                if (authKeyToUse && chunkHashes && chunkHashes.length > 0) {
+                    for (let i = 0; i < chunkHashes.length; i++) {
+                        const chunkHash = chunkHashes[i];
+                        let chunkAuthKey = authKeyToUse;
+                        if (chunkAuthKeys && chunkAuthKeys.length > i && chunkAuthKeys[i]) {
+                            chunkAuthKey = chunkAuthKeys[i];
+                        }
+
+                        for (const server of blossomServers) {
+                            try {
+                                const headResp = await fetch(`${server}/${chunkHash}`, { method: 'HEAD' });
+                                if (headResp.status === 404) continue;
+
+                                const authEvent = await createBlossomAuthEvent(chunkAuthKey, chunkHash, pubkeyToUse);
+                                if (!authEvent) continue;
+
+                                const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
+                                await fetch(`${server}/${chunkHash}`, {
+                                    method: 'DELETE',
+                                    headers: { 'Authorization': authHeader }
+                                });
+                            } catch (e) {
+                                // Silently continue on failure per-server
+                            }
+                        }
+                    }
+                }
+                // ★ image.nostr.build 전용 삭제 로직 제거함 (primal/24242.io와 무관한 구서비스 API)
+            } catch (err) {
+                console.warn('deleteBlossomFiles failed:', err);
+            }
+        }
+        window.deleteBlossomFiles = deleteBlossomFiles;
+        window.selfDeleteAfterDownload = selfDeleteAfterDownload;
+        window.handleDelete = handleDelete;
+        window.decodeFromBase64ToBytes = decodeFromBase64ToBytes;
+        // ---------- 파일 업로드 처리 + 자동 Nostr 단축 (수정됨) ----------
+        async function handleFile(file) {
+            hideProgress();
+            resultBox.style.display = 'none';
+            decryptResult.innerHTML = '';
+
+            try {
+                setProgress(5, t('readingFile'));
+                currentFilename = file.name;
+
+                // ★ 자동삭제가 켜져 있으면, 암호화 전에 삭제용 키를 미리 생성해서 메타데이터에 넣는다
+                let pregenKeys = null;
+                let deleteKeysForMeta = null;
+                if (autoDeleteEnabled) {
+                    const totalChunksEstimate = Math.ceil(file.size / CHUNK_SIZE) || 1;
+                    pregenKeys = await pregenerateDeleteKeys(totalChunksEstimate);
+                    deleteKeysForMeta = {
+                        uploadAuthKey: Array.from(pregenKeys.uploadAuthKey),
+                        uploadedPubkey: pregenKeys.uploadedPubkey,
+                        chunkAuthKeys: pregenKeys.chunkAuthKeys.map(k => Array.from(k))
+                    };
+                }
+
+                setProgress(15, t('encrypting'));
+                const { ciphertext, key, iv } = await encryptFileWithName(file, autoDeleteEnabled, deleteKeysForMeta);
+                setProgress(40, t('encryptDone'));
+
+                const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
+
+                // ★ 암호화 후 실제 청크 개수가 예상과 다를 경우를 대비해 키 배열 길이를 맞춘다
+                if (pregenKeys && pregenKeys.chunkAuthKeys.length !== totalChunks) {
+                    const { generateSecretKey, getPublicKey } = await loadNostrTools();
+                    const adjustedKeys = [];
+                    for (let i = 0; i < totalChunks; i++) {
+                        adjustedKeys.push(pregenKeys.chunkAuthKeys[i] || generateSecretKey());
+                    }
+                    pregenKeys.chunkAuthKeys = adjustedKeys;
+                    pregenKeys.uploadAuthKey = adjustedKeys[0];
+                    pregenKeys.uploadedPubkey = getPublicKey(adjustedKeys[0]);
+                }
+
+                setProgress(50, t('uploadingBlossom'), 0, totalChunks);
+
+                const uploadResult = await uploadToBlossomParallel(ciphertext, (current, total) => {
+                    const percent = 50 + (current / total) * 40;
+                    setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
+                }, pregenKeys);
+
+                setProgress(90, t('uploadDoneLinking'));
+
+                // ★ 공유 URL에는 자동삭제 관련 정보를 절대 포함하지 않는다 (원본 로직 그대로)
+                const fullShareLink = createShareLink(
+                    uploadResult.hash,
+                    key,
+                    iv,
+                    uploadResult.chunkHashes
+                );
+
+                setProgress(95, t('shorteningNostr'));
+
+                // ============================================================
+                // ★★★ 항상 단일 URL로만 단축 (분할 로직 제거) ★★★
+                // ============================================================
+                const { generateSecretKey, getPublicKey } = await loadNostrTools();
+                const shareSenderSk = generateSecretKey();
+                const shareSenderPk = getPublicKey(shareSenderSk);
+                const shareRecipientPk = shareSenderPk;
+
+                const deleteSenderSk = generateSecretKey();
+                const deleteSenderPk = getPublicKey(deleteSenderSk);
+                const deleteRecipientPk = deleteSenderPk;
+
+                let shortUrls = [];
+                let allShortened = true;
+                let uploadAuthKeyEncoded = null;
+                let chunkAuthKeysEncoded = null;
+
+                try {
+                    const shareResult = await publishGiftWrap(fullShareLink, shareRecipientPk, shareSenderSk);
+
+                    const deleteMetadata = {
+                        fileHash: uploadResult.hash,
+                        chunkHashes: uploadResult.chunkHashes,
+                        uploadAuthKey: uploadResult.uploadAuthKey ? Array.from(uploadResult.uploadAuthKey) : null,
+                        uploadedPubkey: uploadResult.uploadedPubkey,
+                        chunkAuthKeys: uploadResult.chunkAuthKeys ? uploadResult.chunkAuthKeys.map(key =>
+                            key instanceof Uint8Array ? Array.from(key) : key
+                        ).filter(key => key !== null) : [],
+                        shareEventId: shareResult.eventId,
+                        sharePrivateKey: shareSenderSk ? Array.from(shareSenderSk) : null
+                    };
+                    const deleteMetadataJson = JSON.stringify(deleteMetadata);
+                    const deleteMetadataEncoded = encodeToBase64(deleteMetadataJson);
+
+                    const fullDeleteUrl = new URL(window.location.href);
+                    fullDeleteUrl.search = '';
+                    fullDeleteUrl.searchParams.set('delete', 'true');
+                    fullDeleteUrl.searchParams.set('m', deleteMetadataEncoded);
+
+                    const deleteResult = await publishGiftWrap(fullDeleteUrl.toString(), deleteRecipientPk, deleteSenderSk);
+
+                    if (shareResult.success && deleteResult.success) {
+                        const shareEncodedId = encodeToBase64(shareResult.eventId);
+                        const shareEncodedKey = encodeToBase64(shareSenderSk);
+                        const deleteEncodedId = encodeToBase64(deleteResult.eventId);
+                        const deleteEncodedKey = encodeToBase64(deleteSenderSk);
+
+                        if (shareEncodedId && shareEncodedKey && deleteEncodedId && deleteEncodedKey) {
+                            const shortUrl = new URL(window.location.href);
+                            shortUrl.search = '';
+                            shortUrl.searchParams.set('id', shareEncodedId);
+                            shortUrl.searchParams.set('k', shareEncodedKey);
+
+                            const deleteUrl = new URL(window.location.href);
+                            deleteUrl.search = '';
+                            deleteUrl.searchParams.set('delete', deleteEncodedId);
+                            deleteUrl.searchParams.set('k', deleteEncodedKey);
+
+                            if (uploadResult.uploadAuthKey) {
+                                uploadAuthKeyEncoded = encodeToBase64(uploadResult.uploadAuthKey);
+                            }
+                            if (uploadResult.chunkAuthKeys && Array.isArray(uploadResult.chunkAuthKeys)) {
+                                chunkAuthKeysEncoded = uploadResult.chunkAuthKeys.map(key => {
+                                    if (key instanceof Uint8Array) {
+                                        return encodeToBase64(key);
+                                    }
+                                    return key;
+                                });
+                            }
+
+                            shortUrls = [{
+                                original: fullShareLink,
+                                short: shortUrl.toString(),
+                                deleteUrl: deleteUrl.toString(),
+                                eventId: shareResult.eventId,
+                                privateKey: shareSenderSk,
+                                deleteEventId: deleteResult.eventId,
+                                deletePrivateKey: deleteSenderSk,
+                                uploadedPubkey: uploadResult.uploadedPubkey,
+                                uploadAuthKey: uploadResult.uploadAuthKey,
+                                uploadAuthKeyEncoded: uploadAuthKeyEncoded,
+                                chunkAuthKeys: uploadResult.chunkAuthKeys || null,
+                                chunkAuthKeysEncoded: chunkAuthKeysEncoded,
+                                success: true
+                            }];
+                        } else {
+                            shortUrls = [{
+                                original: fullShareLink,
+                                short: fullShareLink,
+                                deleteUrl: null,
+                                eventId: null,
+                                privateKey: null,
+                                uploadedPubkey: uploadResult.uploadedPubkey,
+                                uploadAuthKey: null,
+                                uploadAuthKeyEncoded: null,
+                                chunkAuthKeys: null,
+                                chunkAuthKeysEncoded: null,
+                                success: false,
+                                error: t('keyDecodeFail')
+                            }];
+                            allShortened = false;
+                        }
+                    } else {
+                        shortUrls = [{
+                            original: fullShareLink,
+                            short: fullShareLink,
+                            deleteUrl: null,
+                            eventId: null,
+                            privateKey: null,
+                            uploadedPubkey: uploadResult.uploadedPubkey,
+                            uploadAuthKey: null,
+                            uploadAuthKeyEncoded: null,
+                            chunkAuthKeys: null,
+                            chunkAuthKeysEncoded: null,
+                            success: false,
+                            error: t('errorOccurred')
+                        }];
+                        allShortened = false;
+                    }
+                } catch (err) {
+                    shortUrls = [{
+                        original: fullShareLink,
+                        short: fullShareLink,
+                        deleteUrl: null,
+                        eventId: null,
+                        privateKey: null,
+                        uploadedPubkey: uploadResult.uploadedPubkey,
+                        uploadAuthKey: null,
+                        uploadAuthKeyEncoded: null,
+                        chunkAuthKeys: null,
+                        chunkAuthKeysEncoded: null,
+                        success: false,
+                        error: err.message
+                    }];
+                    allShortened = false;
+                }
+
+                setProgress(100, t('allDone'));
+                setTimeout(hideProgress, 1500);
+
+                let linkHtml = `
+                    <div class="flex-between">
+                        <span class="text-green">${t('uploadSuccess')}</span>
+                        <span class="badge">${uploadResult.server}</span>
+                    </div>
+                    <div style="margin-top:8px;font-size:13px;color:#8b949e;">
+                        ${t('fileInfo', { name: file.name, size: (file.size / 1024).toFixed(1) })}
+                        <br>${t('chunkCount', { count: uploadResult.totalChunks, mb: CHUNK_SIZE/1024/1024 })}
+                    </div>
+                `;
+
+                if (shortUrls.length > 0 && allShortened) {
+                    const deleteUrlHtml = shortUrls[0].deleteUrl ? `
+                    <div style="margin-top:8px;display:flex;gap:8px;align-items:center;border-top:1px solid #30363d;padding-top:8px;">
+                        <span style="font-size:12px;color:#8b949e;">Delete URL:</span>
+                        <input type="text" id="deleteUrlInput" value="${shortUrls[0].deleteUrl}" readonly style="flex:1;padding:6px 8px;background:#0d1117;border:1px solid #30363d;border-radius:4px;color:#e6edf3;font-size:11px;font-family:'JetBrains Mono',monospace;outline:none;">
+                        <button class="btn btn-secondary copy-delete-btn" style="font-size:11px;padding:4px 10px;">Copy</button>
+                        <button class="btn delete-btn" style="font-size:11px;padding:4px 12px;background:#da3633;">Delete</button>
+                    </div>
+                    ` : '';
+
+                    linkHtml += `
+                        <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #238636;">
+                            <span class="text-green">${t('shareUrl')}</span>
+                            <div class="link-field" style="margin-top:8px;">
+                                <input type="text" id="shortUrlInput" value="${shortUrls[0].short}" readonly>
+                                <button class="btn btn-secondary" id="copyShortBtn">${t('copy')}</button>
+                            </div>
+                            ${deleteUrlHtml}
+                            <div style="font-size:11px;color:#484f58;margin-top:4px;">
+                                ${t('eventIdLabel', { id: shortUrls[0].eventId })}
+                            </div>
+                            <button class="btn btn-secondary" id="downloadShortTxtBtn" style="margin-top:6px;font-size:11px;padding:4px 12px;">${t('downloadTxt')}</button>
+                        </div>
+                    `;
+                } else {
+                    linkHtml += `
+                        <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #f0883e;">
+                            <span class="text-muted">${t('shortenFailed')}</span>
+                            <div class="link-field" style="margin-top:8px;">
+                                <input type="text" id="fallbackLink" value="${fullShareLink}" readonly>
+                                <button class="btn btn-secondary" id="copyFallbackBtn">${t('copy')}</button>
+                            </div>
+                        </div>
+                    `;
+                }
+
+                showResult(linkHtml);
+
+                // 이벤트 리스너 설정 (분할 URL 관련 핸들러 제거됨)
+                if (!window._deleteEventsAttached) {
+                    resultBox.addEventListener('click', async function(e) {
+                        // Copy 버튼
+                        if (e.target.classList.contains('copy-delete-btn')) {
+                            const input = document.getElementById('deleteUrlInput');
+                            if (input) {
+                                navigator.clipboard.writeText(input.value).then(() => {
+                                    e.target.textContent = '✅ Copied';
+                                    setTimeout(() => e.target.textContent = 'Copy', 2000);
+                                }).catch(() => {
+                                    input.select();
+                                    document.execCommand('copy');
+                                    e.target.textContent = '✅ Copied';
+                                    setTimeout(() => e.target.textContent = 'Copy', 2000);
+                                });
+                            }
+                        }
+
+                        // Delete 버튼
+                        if (e.target.classList.contains('delete-btn')) {
+                            const deleteUrl = document.getElementById('deleteUrlInput')?.value;
+                            if (deleteUrl) {
+                                const btn = e.target;
+                                const originalText = btn.textContent;
+                                btn.textContent = '⏳ Deleting...';
+                                btn.disabled = true;
+                                btn.style.opacity = '0.6';
+                                btn.style.cursor = 'wait';
+
+                                try {
+                                    const urlObj = new URL(deleteUrl);
+                                    const encodedId = urlObj.searchParams.get('delete');
+                                    const encodedKey = urlObj.searchParams.get('k');
+
+                                    if (encodedId && encodedKey) {
+                                        const eventId = decodeFromBase64(encodedId);
+                                        let privateKey = null;
+                                        const bytes = decodeFromBase64ToBytes(encodedKey);
+                                        if (bytes) {
+                                            privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                                        }
+
+                                        if (eventId && privateKey && privateKey.length === 64) {
+                                            let uploadAuthKey = null;
+                                            let chunkAuthKeys = null;
+                                            let allChunkHashes = null;
+                                            let fileHash = null;
+                                            let uploadedPubkey = null;
+
+                                            if (typeof shortUrls !== 'undefined' && shortUrls.length > 0 && shortUrls[0].success) {
+                                                uploadAuthKey = shortUrls[0].uploadAuthKey || null;
+                                                chunkAuthKeys = shortUrls[0].chunkAuthKeys || null;
+                                                allChunkHashes = shortUrls[0].allChunkHashes || null;
+                                                fileHash = shortUrls[0].fileHash || null;
+                                                uploadedPubkey = shortUrls[0].uploadedPubkey || null;
+                                            }
+
+                                            await handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey);
+                                        } else {
+                                            alert('Error: Failed to decode event ID or private key');
+                                        }
+                                    } else {
+                                        alert('Error: Invalid delete URL - missing parameters');
+                                    }
+                                } catch (err) {
+                                    alert('Error: ' + err.message);
+                                } finally {
+                                    btn.textContent = originalText || 'Delete';
+                                    btn.disabled = false;
+                                    btn.style.opacity = '1';
+                                    btn.style.cursor = 'pointer';
+                                }
+                            } else {
+                                alert('Error: No delete URL found');
+                            }
+                        }
+                    });
+                    window._deleteEventsAttached = true;
+                }
+
+                // 기존 버튼 이벤트 리스너들
+                document.getElementById('copyShortBtn')?.addEventListener('click', () => {
+                    const input = document.getElementById('shortUrlInput');
+                    if (input) {
+                        navigator.clipboard.writeText(input.value).then(() => {
+                            const btn = document.getElementById('copyShortBtn');
+                            if (btn) {
+                                btn.textContent = t('copied');
+                                setTimeout(() => btn.textContent = t('copy'), 2000);
+                            }
+                        }).catch(() => {
+                            input.select();
+                            document.execCommand('copy');
+                        });
+                    }
+                });
+
+                document.getElementById('downloadShortTxtBtn')?.addEventListener('click', () => {
+                    const content = shortUrls[0].short;
+                    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${currentFilename || 'file'}_share_url.txt`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(url), 5000);
+                });
+
+                document.getElementById('copyFallbackBtn')?.addEventListener('click', () => {
+                    const input = document.getElementById('fallbackLink');
+                    if (input) {
+                        navigator.clipboard.writeText(input.value).then(() => {
+                            const btn = document.getElementById('copyFallbackBtn');
+                            if (btn) {
+                                btn.textContent = t('copied');
+                                setTimeout(() => btn.textContent = t('copy'), 2000);
+                            }
+                        }).catch(() => {
+                            input.select();
+                            document.execCommand('copy');
+                        });
+                    }
+                });
+
+                shareLinkInput.value = shortUrls.length > 0 && shortUrls[0].success ? shortUrls[0].short : fullShareLink;
+
+            } catch (err) {
+                hideProgress();
+                showResult(`
+                    <div class="text-red">${t('errorOccurred')}</div>
+                    <div style="font-size:13px;margin-top:6px;color:#8b949e;">${err.message}</div>
+                `, true);
+                console.error(err);
+            }
+        }
+
+        function setProgress(percent, label, currentChunk, totalChunks) {
+            progressWrap.style.display = 'block';
+            progressFill.style.width = `${Math.min(100, percent)}%`;
+            progressPercent.textContent = `${Math.min(100, percent).toFixed(3)}%`;
+            if (label) progressLabel.textContent = label;
+            if (currentChunk !== undefined && totalChunks !== undefined) {
+                chunkInfo.textContent = t('chunkInfoText', { current: currentChunk, total: totalChunks });
+            }
+        }
+
+        function hideProgress() {
+            progressWrap.style.display = 'none';
+        }
+
+        function showResult(content, isError = false) {
+            resultBox.style.display = 'block';
+            resultBox.className = `result-box ${isError ? 'error' : 'success'}`;
+            resultContent.innerHTML = content;
+        }
+
+        function showDecryptResult(msg, isError = false) {
+            decryptResult.innerHTML = `<span style="color:${isError ? '#f85149' : '#3fb950'}">${msg}</span>`;
+        }
+
+        // ---------- 모달 제어 ----------
+        function openModal() {
+            termsModal.classList.add('active');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeModal() {
+            termsModal.classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        termsLink.addEventListener('click', openModal);
+        modalCloseBtn.addEventListener('click', closeModal);
+        termsModal.addEventListener('click', (e) => {
+            if (e.target === termsModal) closeModal();
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeModal();
+        });
+
+
+
+
+
+        // ---------- 파일 청크 분할 다운로드 함수 ----------
+        async function downloadFileAsChunks(data, filename, chunkSize = 10 * 1024 * 1024) {
+            const totalChunks = Math.ceil(data.length / chunkSize);
+
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, data.length);
+                const chunk = data.slice(start, end);
+                
+                const chunkBlob = new Blob([chunk]);
+                const chunkUrl = URL.createObjectURL(chunkBlob);
+                
+                const a = document.createElement('a');
+                a.href = chunkUrl;
+                a.download = `${filename}.part${String(i + 1).padStart(3, '0')}.chunk`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                
+                setTimeout(() => URL.revokeObjectURL(chunkUrl), 1000);
+                await new Promise(resolve => setTimeout(resolve, 300));
+            }
+            
+            return totalChunks;
+        }
+
+        // ---------- 이벤트 조회 ----------
+        async function fetchEventFromRelays(eventId) {
+            // eventId가 이미 hex 형식인지 확인 (64자리 16진수)
+            const isHex = /^[0-9a-fA-F]{64}$/.test(eventId);
+            
+            // hex가 아니면 Base64 디코딩 시도
+            let hexEventId = eventId;
+            if (!isHex) {
+                const decoded = decodeFromBase64(eventId);
+                if (decoded && /^[0-9a-fA-F]{64}$/.test(decoded)) {
+                    hexEventId = decoded;
+                } else {
+                    console.warn('Invalid event ID format:', eventId);
+                    return null;
+                }
+            }
+            
+            console.log('Fetching event with ID:', hexEventId);
+            
+            for (const relay of NOSTR_RELAYS) {
+                try {
+                    const ws = new WebSocket(relay);
+                    const event = await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            ws.close();
+                            reject(new Error(`Timeout from ${relay}`));
+                        }, 10000);
+
+                        ws.onopen = () => {
+                            // 올바른 REQ 형식 사용
+                            const reqMsg = JSON.stringify(['REQ', 'get-event', { ids: [hexEventId] }]);
+                            console.log(`Sending to ${relay}:`, reqMsg);
+                            ws.send(reqMsg);
+                        };
+                        ws.onmessage = (e) => {
+                            try {
+                                const msg = JSON.parse(e.data);
+                                console.log(`Received from ${relay}:`, msg);
+                                if (msg[0] === 'EVENT' && msg[2] && msg[2].id === hexEventId) {
+                                    clearTimeout(timeout);
+                                    resolve(msg[2]);
+                                    ws.close();
+                                }
+                                if (msg[0] === 'EOSE') {
+                                    clearTimeout(timeout);
+                                    resolve(null);
+                                    ws.close();
+                                }
+                                // CLOSED 메시지 처리
+                                if (msg[0] === 'CLOSED') {
+                                    console.warn(`Relay ${relay} closed subscription:`, msg);
+                                    clearTimeout(timeout);
+                                    resolve(null);
+                                    ws.close();
+                                }
+                            } catch (parseErr) {
+                                console.warn(`Failed to parse message from ${relay}:`, parseErr);
+                            }
+                        };
+                        ws.onerror = () => {
+                            clearTimeout(timeout);
+                            reject(new Error(`WebSocket error from ${relay}`));
+                        };
+                    });
+                    if (event) return event;
+                } catch (err) {
+                    console.warn(`Failed to fetch from ${relay}:`, err.message);
+                }
+            }
+            return null;
+        }
+
+        // ---------- Nostr 복호화 (k 파라미터 자동 처리) ----------
+        async function handleNostrDecrypt() {
+            const rawUrl = shareLinkInput.value.trim();
+            if (!rawUrl) {
+                showDecryptResult(t('enterUrlToDecrypt'), true);
+                return;
+            }
+
+            try {
+                const urlObj = new URL(rawUrl);
+                const encodedId = urlObj.searchParams.get('id');
+                const encodedKey = urlObj.searchParams.get('k');
+                
+                if (!encodedId || !encodedKey) {
+                    showDecryptResult(t('noEventIdInUrl'), true);
+                    return;
+                }
+
+                // Base64 디코딩
+                let eventId = decodeFromBase64(encodedId);
+                let senderKeyHex = decodeFromBase64(encodedKey);
+                
+                // 디코딩 실패 시 원본 Base64 사용 시도
+                if (!eventId) {
+                    eventId = encodedId;
+                }
+                if (!senderKeyHex) {
+                    senderKeyHex = encodedKey;
+                }
+                
+                // eventId가 hex 형식인지 확인
+                if (!/^[0-9a-fA-F]{64}$/.test(eventId)) {
+                    showDecryptResult(t('keyDecodeFail'), true);
+                    return;
+                }
+                
+                if (!senderKeyHex || senderKeyHex.length !== 64) {
+                    showDecryptResult(t('keyDecodeFail'), true);
+                    return;
+                }
+
+                showDecryptResult(t('lookingUpEvent', { id: eventId.slice(0, 8) }), false);
+                const event = await fetchEventFromRelays(eventId);
+                if (!event) {
+                    showDecryptResult(t('eventNotFound'), true);
+                    return;
+                }
+
+                try {
+                    const { nip44, getPublicKey } = await loadNostrTools();
+                    const recipientPk = getPublicKey(senderKeyHex);
+                    const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                    const decrypted = nip44.decrypt(event.content, conversationKey);
+                    const rumor = JSON.parse(decrypted);
+                    const originalUrl = rumor.content;
+
+                    if (originalUrl && originalUrl.includes('#')) {
+                        showDecryptResult(t('decryptSuccessRedirect'), false);
+                        await handleDecryptWithUrl(originalUrl, true);
+                    } else {
+                        showDecryptResult(t('originalUrlInvalid', { url: originalUrl }), true);
+                    }
+                } catch (err) {
+                    showDecryptResult(t('decryptFail', { err: err.message }), true);
+                    console.error(err);
+                }
+            } catch (err) {
+                showDecryptResult(t('errorGeneric', { err: err.message }), true);
+                console.error(err);
+            }
+        }
+
+        // ---------- URL을 직접 받아서 복호화 실행 (표시 없이) ----------
+        async function handleDecryptWithUrl(url, fromNostr = false) {
+            if (isProcessing) return;
+            isProcessing = true;
+
+            try {
+                if (!url) {
+                    showDecryptResult(t('enterLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                if (!url.includes('#')) {
+                    showDecryptResult(t('invalidShareLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                const parsed = parseShareLink(url);
+                if (!parsed) {
+                    showDecryptResult(t('invalidShareLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                try {
+                    showDecryptResult(t('downloadingChunks'), false);
+                    const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
+
+                    showDecryptResult(t('decrypting'), false);
+                    const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
+
+                    // ★★★ autoDelete 처리 - fromNostr이 true일 때만 실행 ★★★
+                    if (result.autoDelete && result.deleteKeys && fromNostr) {
+                        showDecryptResult('Deleting files...', false);
+                        const dk = result.deleteKeys;
+                        const uploadAuthKeyBytes = dk.uploadAuthKey ? new Uint8Array(dk.uploadAuthKey) : null;
+                        const chunkAuthKeysBytes = (dk.chunkAuthKeys || []).map(k => k ? new Uint8Array(k) : null);
+                        const uploadedPubkey = dk.uploadedPubkey || null;
+
+                        // 1. Blossom 파일 삭제
+                        await deleteBlossomFiles(
+                            uploadAuthKeyBytes,
+                            chunkAuthKeysBytes,
+                            parsed.chunkHashes,
+                            parsed.hash,
+                            uploadedPubkey
+                        );
+
+                        // 2. 현재 단축 URL의 Nostr 이벤트 삭제 (kind 5 이벤트 전송)
+                        try {
+                            const currentUrlObj = new URL(window.location.href);
+                            const encodedEventId = currentUrlObj.searchParams.get('id');
+                            const encodedPrivateKey = currentUrlObj.searchParams.get('k');
+
+                            if (encodedEventId && encodedPrivateKey) {
+                                const eventId = decodeFromBase64(encodedEventId);
+                                const privateKeyHex = decodeFromBase64(encodedPrivateKey);
+
+                                if (eventId && privateKeyHex && privateKeyHex.length === 64) {
+                                    showDecryptResult('Deleting URL...', false);
+
+                                    const { finalizeEvent, getPublicKey } = await loadNostrTools();
+                                    const sk = hexToUint8(privateKeyHex);
+                                    if (sk) {
+                                        const pubkey = getPublicKey(sk);
+                                        const now = Math.floor(Date.now() / 1000);
+
+                                        const deleteEvent = {
+                                            kind: 5,
+                                            pubkey: pubkey,
+                                            created_at: now,
+                                            tags: [
+                                                ['e', eventId]
+                                            ],
+                                            content: ''
+                                        };
+
+                                        const signedEvent = await finalizeEvent(deleteEvent, sk);
+
+                                        for (const relay of NOSTR_RELAYS) {
+                                            try {
+                                                const ws = new WebSocket(relay);
+                                                await new Promise((resolve, reject) => {
+                                                    const timeout = setTimeout(() => {
+                                                        ws.close();
+                                                        reject(new Error('Timeout'));
+                                                    }, 5000);
+
+                                                    ws.onopen = () => {
+                                                        ws.send(JSON.stringify(['EVENT', signedEvent]));
+                                                        clearTimeout(timeout);
+                                                        resolve();
+                                                    };
+                                                    ws.onerror = () => {
+                                                        clearTimeout(timeout);
+                                                        reject(new Error(`Relay ${relay} failed`));
+                                                    };
+                                                });
+                                            } catch (e) {
+                                                console.warn(`Failed to send delete event to ${relay}:`, e.message);
+                                            }
+                                        }
+                                        showDecryptResult('✅ Deleted URL.', false);
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            console.warn('Failed to delete Nostr event:', e);
+                        }
+
+                        showDecryptResult('Deleted files.', false);
+                    }
+
+                    // 파일 다운로드 로직
+                    const fileSizeMB = result.data.length / (1024 * 1024);
+                    if (fileSizeMB > 10) {
+                        showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
+
+                        const downloadHtml = `
+                            <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #f0883e;">
+                                <span class="text-muted">${t('fileTooBigPackage', { mb: fileSizeMB.toFixed(1) })}</span>
+                                <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+                                    <button class="btn" id="downloadFullBtn2" style="font-size:12px;padding:6px 16px;">${t('downloadFull')}</button>
+                                </div>
+                            </div>
+                        `;
+                        decryptResult.innerHTML += downloadHtml;
+
+                        document.getElementById('downloadFullBtn2')?.addEventListener('click', () => {
+                            const blob = new Blob([result.data]);
+                            const downloadUrl = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = downloadUrl;
+                            a.download = result.filename || 'file';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            setTimeout(() => URL.revokeObjectURL(downloadUrl), 5000);
+                            showDecryptResult(t('downloadStarted', { name: result.filename }), false);
+                        });
+
+                        isProcessing = false;
+                        return;
+                    }
+
+                    // 일반 파일 다운로드
+                    const blob = new Blob([result.data]);
+                    const url2 = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url2;
+                    a.download = result.filename || 'file';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(url2), 5000);
+
+                    showDecryptResult(t('downloadCompleteNamed', {
+                        name: result.filename,
+                        size: (result.data.length / 1024).toFixed(1)
+                    }), false);
+
+                } catch (err) {
+                    showDecryptResult(t('decryptFail', { err: err.message }), true);
+                    console.error(err);
+                }
+            } catch (err) {
+                showDecryptResult(t('errorGeneric', { err: err.message }), true);
+                console.error(err);
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+
+
+        // ---------- 수정된 복호화 함수 (분할 다운로드 지원) ----------
+        async function handleDecrypt() {
+            if (isProcessing) return;
+            isProcessing = true;
+
+            try {
+                const rawUrl = shareLinkInput.value.trim();
+                if (!rawUrl) {
+                    showDecryptResult(t('enterLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                const urlObj = new URL(rawUrl);
+                const encodedId = urlObj.searchParams.get('id');
+                const encodedKey = urlObj.searchParams.get('k');
+                
+                if (encodedId || encodedKey) {
+                    await handleNostrDecrypt();
+                    isProcessing = false;
+                    return;
+                }
+
+                // 일반 URL 처리 (기존과 동일)
+                if (!rawUrl.includes('#')) {
+                    showDecryptResult(t('invalidShareLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                const parsed = parseShareLink(rawUrl);
+                if (!parsed) {
+                    showDecryptResult(t('invalidShareLink'), true);
+                    isProcessing = false;
+                    return;
+                }
+
+                try {
+                    showDecryptResult(t('downloadingChunks'), false);
+                    const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
+                    showDecryptResult(t('decrypting'), false);
+                    
+                    const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
+                    
+                    const fileSizeMB = result.data.length / (1024 * 1024);
+                    if (fileSizeMB > 10) {
+                        showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
+                        
+                        const downloadHtml = `
+                            <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #f0883e;">
+                                <span class="text-muted">${t('fileTooBigPackage', { mb: fileSizeMB.toFixed(1) })}</span>
+                                <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+                                    <button class="btn" id="downloadFullBtn" style="font-size:12px;padding:6px 16px;">${t('downloadFull')}</button>
+                                    <button class="btn btn-secondary" id="downloadSplitBtn" style="font-size:12px;padding:6px 16px;">${t('downloadSplit')}</button>
+                                </div>
+                                <div id="splitProgress" style="margin-top:8px;font-size:12px;color:#8b949e;"></div>
+                            </div>
+                        `;
+                        decryptResult.innerHTML += downloadHtml;
+                        
+                        document.getElementById('downloadFullBtn')?.addEventListener('click', () => {
+                            const blob = new Blob([result.data]);
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = result.filename || 'file';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            setTimeout(() => URL.revokeObjectURL(url), 5000);
+                            showDecryptResult(t('downloadStarted', { name: result.filename }), false);
+                        });
+                        
+                        document.getElementById('downloadSplitBtn')?.addEventListener('click', async () => {
+                            const progressDiv = document.getElementById('splitProgress');
+                            progressDiv.textContent = t('preparing');
+                            
+                            try {
+                                const totalChunks = await downloadFileAsChunks(
+                                    result.data,
+                                    result.filename || 'file',
+                                    10 * 1024 * 1024
+                                );
+                                
+                                progressDiv.innerHTML = `
+                                    ${t('splitDownloaded', { count: totalChunks })}<br>
+                                    <span style="font-size:11px;color:#484f58;">
+                                        ${t('fileName', { name: result.filename })}.part001.chunk ~ ${result.filename}.part${String(totalChunks).padStart(3, '0')}.chunk
+                                    </span>
+                                `;
+                            } catch (err) {
+                                progressDiv.innerHTML = t('decryptFail', { err: err.message });
+                            }
+                        });
+                        
+                        isProcessing = false;
+                        return;
+                    }
+                    
+                    const blob = new Blob([result.data]);
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = result.filename || 'file';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+                    showDecryptResult(t('downloadCompleteNamed', { 
+                        name: result.filename, 
+                        size: (result.data.length / 1024).toFixed(1) 
+                    }), false);
+                    
+                } catch (err) {
+                    showDecryptResult(t('decryptFail', { err: err.message }), true);
+                    console.error(err);
+                }
+            } catch (err) {
+                showDecryptResult(t('errorGeneric', { err: err.message }), true);
+                console.error(err);
+            } finally {
+                isProcessing = false;
+            }
+        }
+
+        // ---------- 이벤트 바인딩 ----------
+        dropZone.addEventListener('click', () => {
+            if (!isMultiMode) {
+                fileInput.multiple = false;
+                fileInput.removeAttribute('webkitdirectory');
+            }
+            fileInput.click();
+        });
+
+        decryptBtn.addEventListener('click', handleDecrypt);
+        shareLinkInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') handleDecrypt();
+        });
+
+
+
+        window.addEventListener('load', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            const encodedId = urlParams.get('id');
+            const k = urlParams.get('k');
+            const deleteId = urlParams.get('delete');
+            const deleteKey = urlParams.get('k');
+            
+            if (deleteId && deleteKey) {
+                const eventId = decodeFromBase64(deleteId);
+                let privateKey = null;
+                const bytes = decodeFromBase64ToBytes(deleteKey);
+                if (bytes) {
+                    privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                }
+                
+                if (eventId && privateKey && privateKey.length === 64) {
+                    showDecryptResult('Processing delete request...', false);
+                    
+                    setTimeout(async () => {
+                        // ★★★ delete URL은 handleDelete에서 직접 복호화하므로 null 전달 ★★★
+                        await handleDelete(eventId, privateKey, null, null, null, null, null);
+                        const cleanUrl = window.location.pathname + window.location.hash;
+                        window.history.replaceState({}, document.title, cleanUrl);
+                    }, 500);
+                } else {
+                    showDecryptResult('Invalid delete URL: Failed to decode event ID or private key', true);
+                }
+                return;
+            }
+            
+            // 기존 복호화 처리
+            if (k && encodedId) {
+                shareLinkInput.value = window.location.href;
+                setTimeout(async () => {
+                    await handleNostrDecrypt();
+                }, 500);
+                return;
+            }
+            
+            if (encodedId) {
+                shareLinkInput.value = window.location.href;
+                showDecryptResult(`Nostr event ID included. Click "Decrypt" button.`, false);
+            } else if (window.location.hash) {
+                shareLinkInput.value = window.location.href;
+                setTimeout(async () => {
+                    await handleDecrypt();
+                }, 500);
+            }
+        });
+
+
+
+
+        window.__fileblossom = {
+            encryptFileWithName,
+            decryptFileWithName,
+            uploadToBlossomParallel,
+            downloadFromBlossom,
+            createShareLink,
+            parseShareLink,
+            publishGiftWrap,
+            encodeToBase64,
+            decodeFromBase64,
+            BLOSSOM_SERVERS,
+            CHUNK_SIZE,
+            PNG_STUB,
+            NOSTR_RELAYS
+        };
+    </script>
+</body>
+</html>
