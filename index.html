@@ -2300,7 +2300,7 @@
                     return await finalizeEvent(authEvent, authSk);
                 }
 
-                const blossomServers = BLOSSOM_SERVERS; // ★ primal / 24242.io 목록 그대로 사용
+                const blossomServers = BLOSSOM_SERVERS;
                 const authKeyToUse = uploadAuthKey ||
                     (chunkAuthKeys && chunkAuthKeys.length > 0 ? chunkAuthKeys[0] : null);
                 const pubkeyToUse = uploadedPubkey || null;
@@ -2544,7 +2544,6 @@
                 let linkHtml = `
                     <div class="flex-between">
                         <span class="text-green">${t('uploadSuccess')}</span>
-                        <span class="badge">${uploadResult.server}</span>
                     </div>
                     <div style="margin-top:8px;font-size:13px;color:#8b949e;">
                         ${t('fileInfo', { name: file.name, size: (file.size / 1024).toFixed(1) })}
