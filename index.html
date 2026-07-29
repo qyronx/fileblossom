@@ -927,7 +927,7 @@
             }
         };
 
-        let currentLang = (typeof localStorage !== 'undefined' && localStorage.getItem('fb_lang')) || 'ko';
+        let currentLang = (typeof localStorage !== 'undefined' && localStorage.getItem('fb_lang')) || 'en';
 
         function t(key, vars) {
             const dict = I18N[currentLang] || I18N.ko;
