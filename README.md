@@ -41,6 +41,10 @@ File-Blossom/
 
 Bug reports, feature suggestions, and pull requests are welcome.
 
+## Wiki
+
+NamuWiki: https://namu.wiki/w/file%20blossom
+
 ## License
 
 This project is licensed. See the `LICENSE` file for more information.
