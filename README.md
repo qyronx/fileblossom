@@ -32,7 +32,7 @@ File Blossom utilizes the Blossom ecosystem to provide a web-based environment f
 ## Project Structure
 
 ```text
-File-Blossom/
+fileblossom/
 ├── index.html
 └── ...
 ```
