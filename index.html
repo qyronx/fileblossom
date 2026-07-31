@@ -2342,21 +2342,100 @@
         window.selfDeleteAfterDownload = selfDeleteAfterDownload;
         window.handleDelete = handleDelete;
         window.decodeFromBase64ToBytes = decodeFromBase64ToBytes;
-        // ---------- 파일 업로드 처리 + 자동 Nostr 단축 (수정됨) ----------
+        // ---------- 스트리밍 방식으로 파일 읽기----------
+        async function readFileStream(file, onProgress) {
+            const chunkSize = 10 * 1024 * 1024; // 10MB
+            const totalSize = file.size;
+            let offset = 0;
+            const chunks = [];
+        
+            while (offset < totalSize) {
+                const end = Math.min(offset + chunkSize, totalSize);
+                const chunk = file.slice(offset, end);
+                const buffer = await chunk.arrayBuffer();
+                chunks.push(new Uint8Array(buffer));
+                
+                offset = end;
+                
+                if (onProgress) {
+                    const progress = (offset / totalSize) * 100;
+                    onProgress(progress, offset, totalSize);
+                }
+            }
+        
+            // 모든 청크를 하나로 합치기
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const result = new Uint8Array(totalLength);
+            let pos = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, pos);
+                pos += chunk.length;
+            }
+            return result;
+        }
+        
+        // ---------- 스트리밍 방식 암호화----------
+        async function encryptFileWithNameStream(fileData, file, autoDelete = false, deleteKeys = null) {
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+        
+            const metadata = JSON.stringify({
+                filename: file.name,
+                size: file.size,
+                type: file.type,
+                autoDelete: !!autoDelete,
+                deleteKeys: autoDelete && deleteKeys ? deleteKeys : null
+            });
+            const metadataBytes = new TextEncoder().encode(metadata);
+        
+            const metadataLengthBytes = new Uint8Array(4);
+            new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
+        
+            const combined = new Uint8Array(4 + metadataBytes.length + fileData.length);
+            combined.set(metadataLengthBytes, 0);
+            combined.set(metadataBytes, 4);
+            combined.set(fileData, 4 + metadataBytes.length);
+        
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
+            );
+            const encrypted = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                cryptoKey,
+                combined
+            );
+            return {
+                ciphertext: new Uint8Array(encrypted),
+                key,
+                iv
+            };
+        }
+        
+        // ---------- handleFile 함수 (스트리밍 방식 적용, 용량 제한 없음) ----------
         async function handleFile(file) {
             hideProgress();
             resultBox.style.display = 'none';
             decryptResult.innerHTML = '';
-
+        
             try {
-                setProgress(5, t('readingFile'));
+                setProgress(0, t('readingFile'));
                 currentFilename = file.name;
-
+        
+                let fileData;
+                try {
+                    fileData = await readFileStream(file, (progress, loaded, total) => {
+                        const percent = (progress / 100) * 20; // 전체 진행률의 0-20%
+                        setProgress(percent, `Reading Files... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
+                    });
+                } catch (readErr) {
+                    throw new Error(`파일 읽기 실패: ${readErr.message}`);
+                }
+        
                 // ★ 자동삭제가 켜져 있으면, 암호화 전에 삭제용 키를 미리 생성해서 메타데이터에 넣는다
                 let pregenKeys = null;
                 let deleteKeysForMeta = null;
                 if (autoDeleteEnabled) {
-                    const totalChunksEstimate = Math.ceil(file.size / CHUNK_SIZE) || 1;
+                    const totalChunksEstimate = Math.ceil(fileData.length / CHUNK_SIZE) || 1;
                     pregenKeys = await pregenerateDeleteKeys(totalChunksEstimate);
                     deleteKeysForMeta = {
                         uploadAuthKey: Array.from(pregenKeys.uploadAuthKey),
@@ -2364,14 +2443,17 @@
                         chunkAuthKeys: pregenKeys.chunkAuthKeys.map(k => Array.from(k))
                     };
                 }
-
-                setProgress(15, t('encrypting'));
-                const { ciphertext, key, iv } = await encryptFileWithName(file, autoDeleteEnabled, deleteKeysForMeta);
+        
+                setProgress(20, t('encrypting'));
+                const { ciphertext, key, iv } = await encryptFileWithNameStream(fileData, file, autoDeleteEnabled, deleteKeysForMeta);
+                
+                // 메모리 해제 (fileData는 더 이상 필요 없음)
+                fileData = null;
+                
                 setProgress(40, t('encryptDone'));
-
+        
                 const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
-
-                // ★ 암호화 후 실제 청크 개수가 예상과 다를 경우를 대비해 키 배열 길이를 맞춘다
+        
                 if (pregenKeys && pregenKeys.chunkAuthKeys.length !== totalChunks) {
                     const { generateSecretKey, getPublicKey } = await loadNostrTools();
                     const adjustedKeys = [];
@@ -2382,26 +2464,26 @@
                     pregenKeys.uploadAuthKey = adjustedKeys[0];
                     pregenKeys.uploadedPubkey = getPublicKey(adjustedKeys[0]);
                 }
-
+        
                 setProgress(50, t('uploadingBlossom'), 0, totalChunks);
-
+        
                 const uploadResult = await uploadToBlossomParallel(ciphertext, (current, total) => {
                     const percent = 50 + (current / total) * 40;
                     setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
                 }, pregenKeys);
-
+        
                 setProgress(90, t('uploadDoneLinking'));
-
-                // ★ 공유 URL에는 자동삭제 관련 정보를 절대 포함하지 않는다 (원본 로직 그대로)
+        
+                // ★ 공유 URL에는 자동삭제 관련 정보를 절대 포함하지 않는다
                 const fullShareLink = createShareLink(
                     uploadResult.hash,
                     key,
                     iv,
                     uploadResult.chunkHashes
                 );
-
+        
                 setProgress(95, t('shorteningNostr'));
-
+        
                 // ============================================================
                 // ★★★ 항상 단일 URL로만 단축 (분할 로직 제거) ★★★
                 // ============================================================
@@ -2409,19 +2491,19 @@
                 const shareSenderSk = generateSecretKey();
                 const shareSenderPk = getPublicKey(shareSenderSk);
                 const shareRecipientPk = shareSenderPk;
-
+        
                 const deleteSenderSk = generateSecretKey();
                 const deleteSenderPk = getPublicKey(deleteSenderSk);
                 const deleteRecipientPk = deleteSenderPk;
-
+        
                 let shortUrls = [];
                 let allShortened = true;
                 let uploadAuthKeyEncoded = null;
                 let chunkAuthKeysEncoded = null;
-
+        
                 try {
                     const shareResult = await publishGiftWrap(fullShareLink, shareRecipientPk, shareSenderSk);
-
+        
                     const deleteMetadata = {
                         fileHash: uploadResult.hash,
                         chunkHashes: uploadResult.chunkHashes,
@@ -2435,31 +2517,31 @@
                     };
                     const deleteMetadataJson = JSON.stringify(deleteMetadata);
                     const deleteMetadataEncoded = encodeToBase64(deleteMetadataJson);
-
+        
                     const fullDeleteUrl = new URL(window.location.href);
                     fullDeleteUrl.search = '';
                     fullDeleteUrl.searchParams.set('delete', 'true');
                     fullDeleteUrl.searchParams.set('m', deleteMetadataEncoded);
-
+        
                     const deleteResult = await publishGiftWrap(fullDeleteUrl.toString(), deleteRecipientPk, deleteSenderSk);
-
+        
                     if (shareResult.success && deleteResult.success) {
                         const shareEncodedId = encodeToBase64(shareResult.eventId);
                         const shareEncodedKey = encodeToBase64(shareSenderSk);
                         const deleteEncodedId = encodeToBase64(deleteResult.eventId);
                         const deleteEncodedKey = encodeToBase64(deleteSenderSk);
-
+        
                         if (shareEncodedId && shareEncodedKey && deleteEncodedId && deleteEncodedKey) {
                             const shortUrl = new URL(window.location.href);
                             shortUrl.search = '';
                             shortUrl.searchParams.set('id', shareEncodedId);
                             shortUrl.searchParams.set('k', shareEncodedKey);
-
+        
                             const deleteUrl = new URL(window.location.href);
                             deleteUrl.search = '';
                             deleteUrl.searchParams.set('delete', deleteEncodedId);
                             deleteUrl.searchParams.set('k', deleteEncodedKey);
-
+        
                             if (uploadResult.uploadAuthKey) {
                                 uploadAuthKeyEncoded = encodeToBase64(uploadResult.uploadAuthKey);
                             }
@@ -2471,7 +2553,7 @@
                                     return key;
                                 });
                             }
-
+        
                             shortUrls = [{
                                 original: fullShareLink,
                                 short: shortUrl.toString(),
@@ -2538,10 +2620,10 @@
                     }];
                     allShortened = false;
                 }
-
+        
                 setProgress(100, t('allDone'));
                 setTimeout(hideProgress, 1500);
-
+        
                 let linkHtml = `
                     <div class="flex-between">
                         <span class="text-green">${t('uploadSuccess')}</span>
@@ -2551,7 +2633,7 @@
                         <br>${t('chunkCount', { count: uploadResult.totalChunks, mb: CHUNK_SIZE/1024/1024 })}
                     </div>
                 `;
-
+        
                 if (shortUrls.length > 0 && allShortened) {
                     const deleteUrlHtml = shortUrls[0].deleteUrl ? `
                     <div style="margin-top:8px;display:flex;gap:8px;align-items:center;border-top:1px solid #30363d;padding-top:8px;">
@@ -2561,7 +2643,7 @@
                         <button class="btn delete-btn" style="font-size:11px;padding:4px 12px;background:#da3633;">Delete</button>
                     </div>
                     ` : '';
-
+        
                     linkHtml += `
                         <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #238636;">
                             <span class="text-green">${t('shareUrl')}</span>
@@ -2587,9 +2669,9 @@
                         </div>
                     `;
                 }
-
+        
                 showResult(linkHtml);
-
+        
                 // 이벤트 리스너 설정 (분할 URL 관련 핸들러 제거됨)
                 if (!window._deleteEventsAttached) {
                     resultBox.addEventListener('click', async function(e) {
@@ -2608,7 +2690,7 @@
                                 });
                             }
                         }
-
+        
                         // Delete 버튼
                         if (e.target.classList.contains('delete-btn')) {
                             const deleteUrl = document.getElementById('deleteUrlInput')?.value;
@@ -2619,12 +2701,12 @@
                                 btn.disabled = true;
                                 btn.style.opacity = '0.6';
                                 btn.style.cursor = 'wait';
-
+        
                                 try {
                                     const urlObj = new URL(deleteUrl);
                                     const encodedId = urlObj.searchParams.get('delete');
                                     const encodedKey = urlObj.searchParams.get('k');
-
+        
                                     if (encodedId && encodedKey) {
                                         const eventId = decodeFromBase64(encodedId);
                                         let privateKey = null;
@@ -2632,14 +2714,14 @@
                                         if (bytes) {
                                             privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
                                         }
-
+        
                                         if (eventId && privateKey && privateKey.length === 64) {
                                             let uploadAuthKey = null;
                                             let chunkAuthKeys = null;
                                             let allChunkHashes = null;
                                             let fileHash = null;
                                             let uploadedPubkey = null;
-
+        
                                             if (typeof shortUrls !== 'undefined' && shortUrls.length > 0 && shortUrls[0].success) {
                                                 uploadAuthKey = shortUrls[0].uploadAuthKey || null;
                                                 chunkAuthKeys = shortUrls[0].chunkAuthKeys || null;
@@ -2647,7 +2729,7 @@
                                                 fileHash = shortUrls[0].fileHash || null;
                                                 uploadedPubkey = shortUrls[0].uploadedPubkey || null;
                                             }
-
+        
                                             await handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey);
                                         } else {
                                             alert('Error: Failed to decode event ID or private key');
@@ -2670,7 +2752,7 @@
                     });
                     window._deleteEventsAttached = true;
                 }
-
+        
                 // 기존 버튼 이벤트 리스너들
                 document.getElementById('copyShortBtn')?.addEventListener('click', () => {
                     const input = document.getElementById('shortUrlInput');
@@ -2687,7 +2769,7 @@
                         });
                     }
                 });
-
+        
                 document.getElementById('downloadShortTxtBtn')?.addEventListener('click', () => {
                     const content = shortUrls[0].short;
                     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -2700,7 +2782,7 @@
                     document.body.removeChild(a);
                     setTimeout(() => URL.revokeObjectURL(url), 5000);
                 });
-
+        
                 document.getElementById('copyFallbackBtn')?.addEventListener('click', () => {
                     const input = document.getElementById('fallbackLink');
                     if (input) {
@@ -2716,9 +2798,9 @@
                         });
                     }
                 });
-
+        
                 shareLinkInput.value = shortUrls.length > 0 && shortUrls[0].success ? shortUrls[0].short : fullShareLink;
-
+        
             } catch (err) {
                 hideProgress();
                 showResult(`
@@ -2728,6 +2810,7 @@
                 console.error(err);
             }
         }
+        
 
         function setProgress(percent, label, currentChunk, totalChunks) {
             progressWrap.style.display = 'block';
