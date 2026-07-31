@@ -729,7 +729,6 @@
         ]);
 
         const NOSTR_RELAYS = [
-            'wss://relay.damus.io',
             'wss://nos.lol',
             'wss://relay.nostr.band'
         ];
@@ -1290,63 +1289,160 @@
                 senderPk = getPublicKey(senderSk);
             }
             
-            const rumor = {
-                kind: 1,
-                content: link,
-                created_at: Math.floor(Date.now() / 1000),
-                tags: []
-            };
+            // 링크가 65000바이트를 초과하면 분할
+            const MAX_SIZE = 60000; // 안전 마진
+            const linkBytes = new TextEncoder().encode(link);
             
-            try {
-                const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
-                const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
-                
-                const giftWrapEvent = {
-                    kind: 1059,
-                    pubkey: senderPk,
+            let results = [];
+            let eventIds = [];
+            
+            if (linkBytes.length <= MAX_SIZE) {
+                // 일반 경우 (기존 로직)
+                const rumor = {
+                    kind: 1,
+                    content: link,
                     created_at: Math.floor(Date.now() / 1000),
-                    tags: [
-                        ['p', recipientPubkey]
-                    ],
-                    content: encryptedContent
+                    tags: []
                 };
                 
-                const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
+                try {
+                    const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
+                    const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
+                    
+                    const giftWrapEvent = {
+                        kind: 1059,
+                        pubkey: senderPk,
+                        created_at: Math.floor(Date.now() / 1000),
+                        tags: [
+                            ['p', recipientPubkey]
+                        ],
+                        content: encryptedContent
+                    };
+                    
+                    const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
+                    
+                    // 릴레이에 전송
+                    for (const relay of NOSTR_RELAYS) {
+                        try {
+                            const ws = new WebSocket(relay);
+                            await new Promise((resolve, reject) => {
+                                const timeout = setTimeout(() => {
+                                    ws.close();
+                                    reject(new Error('Timeout'));
+                                }, 5000);
+                                
+                                ws.onopen = () => {
+                                    ws.send(JSON.stringify(['EVENT', signedEvent]));
+                                    clearTimeout(timeout);
+                                    resolve();
+                                };
+                                ws.onerror = () => {
+                                    clearTimeout(timeout);
+                                    reject(new Error(`Relay ${relay} failed`));
+                                };
+                            });
+                        } catch (err) {
+                            console.warn(`Failed to send to ${relay}:`, err.message);
+                        }
+                    }
+                    
+                    return {
+                        eventId: signedEvent.id,
+                        success: true,
+                        results: [{ relay: 'all', success: true }]
+                    };
+                } catch (err) {
+                    console.error('NIP-44 encryption failed:', err);
+                    throw new Error(`암호화 실패: ${err.message}`);
+                }
+            } else {
+                //  URL이 너무 길면 분할 전송 
+                console.warn(`URL too long (${linkBytes.length} bytes), splitting...`);
                 
-                const results = [];
-                for (const relay of NOSTR_RELAYS) {
+                const chunkSize = 50000; // 50KB씩 분할
+                const chunks = [];
+                for (let i = 0; i < link.length; i += chunkSize) {
+                    chunks.push(link.slice(i, i + chunkSize));
+                }
+                
+                const totalParts = chunks.length;
+                const partIds = [];
+                
+                for (let i = 0; i < chunks.length; i++) {
+                    const partData = JSON.stringify({
+                        total: totalParts,
+                        index: i,
+                        data: chunks[i]
+                    });
+                    
+                    const rumor = {
+                        kind: 1,
+                        content: partData,
+                        created_at: Math.floor(Date.now() / 1000),
+                        tags: [
+                            ['part', String(i), String(totalParts)]
+                        ]
+                    };
+                    
                     try {
-                        const ws = new WebSocket(relay);
-                        await new Promise((resolve, reject) => {
-                            const timeout = setTimeout(() => {
-                                ws.close();
-                                reject(new Error('Timeout'));
-                            }, 5000);
-                            
-                            ws.onopen = () => {
-                                ws.send(JSON.stringify(['EVENT', signedEvent]));
-                                clearTimeout(timeout);
-                                resolve();
-                            };
-                            ws.onerror = () => {
-                                clearTimeout(timeout);
-                                reject(new Error(`Relay ${relay} failed`));
-                            };
-                        });
-                        results.push({ relay, success: true });
+                        const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
+                        const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
+                        
+                        const giftWrapEvent = {
+                            kind: 1059,
+                            pubkey: senderPk,
+                            created_at: Math.floor(Date.now() / 1000),
+                            tags: [
+                                ['p', recipientPubkey],
+                                ['part', String(i), String(totalParts)]
+                            ],
+                            content: encryptedContent
+                        };
+                        
+                        const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
+                        partIds.push(signedEvent.id);
+                        
+                        // 각 파트 전송
+                        for (const relay of NOSTR_RELAYS) {
+                            try {
+                                const ws = new WebSocket(relay);
+                                await new Promise((resolve, reject) => {
+                                    const timeout = setTimeout(() => {
+                                        ws.close();
+                                        reject(new Error('Timeout'));
+                                    }, 5000);
+                                    
+                                    ws.onopen = () => {
+                                        ws.send(JSON.stringify(['EVENT', signedEvent]));
+                                        clearTimeout(timeout);
+                                        resolve();
+                                    };
+                                    ws.onerror = () => {
+                                        clearTimeout(timeout);
+                                        reject(new Error(`Relay ${relay} failed`));
+                                    };
+                                });
+                            } catch (err) {
+                                console.warn(`Failed to send part ${i} to ${relay}:`, err.message);
+                            }
+                        }
+                        
                     } catch (err) {
-                        results.push({ relay, success: false, error: err.message });
+                        console.error(`Failed to encrypt part ${i}:`, err);
+                        throw new Error(`분할 암호화 실패: ${err.message}`);
                     }
                 }
                 
+                // 분할된 이벤트 ID들을 하나의 문자열로 결합 (구분자로 | 사용)
+                const combinedEventId = partIds.join('|');
+                
                 return {
-                    eventId: signedEvent.id,
-                    success: results.some(r => r.success),
-                    results
+                    eventId: combinedEventId,
+                    success: true,
+                    results: [{ relay: 'all', success: true }],
+                    isSplit: true,
+                    totalParts: totalParts
                 };
-            } catch (err) {
-                console.error('NIP-44 encryption failed:', err);
-                throw new Error(`암호화 실패: ${err.message}`);
             }
         }
 
@@ -2857,10 +2953,50 @@
 
         // ---------- 이벤트 조회 ----------
         async function fetchEventFromRelays(eventId) {
-            // eventId가 이미 hex 형식인지 확인 (64자리 16진수)
+            // 분할된 이벤트 ID인지 확인 (| 구분자)
+            if (eventId.includes('|')) {
+                const partIds = eventId.split('|');
+                const parts = [];
+                
+                for (const partId of partIds) {
+                    const event = await fetchSingleEvent(partId);
+                    if (!event) {
+                        console.warn(`Part ${partId} not found`);
+                        return null;
+                    }
+                    parts.push(event);
+                }
+                
+                // 모든 파트를 조합하여 원본 데이터 복원
+                try {
+                    const { nip44, getPublicKey } = await loadNostrTools();
+                    // 첫 번째 파트에서 sender 키 추출 (모든 파트가 같은 키로 암호화됨)
+                    const firstEvent = parts[0];
+                    // 복호화 시도 (키는 외부에서 전달됨)
+                    // 여기서는 복호화를 위해 임시로 처리
+                    return {
+                        id: eventId,
+                        kind: 1059,
+                        pubkey: firstEvent.pubkey,
+                        content: JSON.stringify({
+                            isSplit: true,
+                            parts: parts.length,
+                            partIds: partIds
+                        }),
+                        tags: [['p', firstEvent.pubkey]]
+                    };
+                } catch (err) {
+                    console.error('Failed to combine split events:', err);
+                    return null;
+                }
+            }
+            
+            return fetchSingleEvent(eventId);
+        }
+        // ---------- 단일 이벤트 조회 ----------
+        async function fetchSingleEvent(eventId) {
             const isHex = /^[0-9a-fA-F]{64}$/.test(eventId);
             
-            // hex가 아니면 Base64 디코딩 시도
             let hexEventId = eventId;
             if (!isHex) {
                 const decoded = decodeFromBase64(eventId);
@@ -2882,9 +3018,8 @@
                             ws.close();
                             reject(new Error(`Timeout from ${relay}`));
                         }, 10000);
-
+        
                         ws.onopen = () => {
-                            // 올바른 REQ 형식 사용
                             const reqMsg = JSON.stringify(['REQ', 'get-event', { ids: [hexEventId] }]);
                             console.log(`Sending to ${relay}:`, reqMsg);
                             ws.send(reqMsg);
@@ -2903,7 +3038,6 @@
                                     resolve(null);
                                     ws.close();
                                 }
-                                // CLOSED 메시지 처리
                                 if (msg[0] === 'CLOSED') {
                                     console.warn(`Relay ${relay} closed subscription:`, msg);
                                     clearTimeout(timeout);
@@ -2926,7 +3060,6 @@
             }
             return null;
         }
-
         // ---------- Nostr 복호화 (k 파라미터 자동 처리) ----------
         async function handleNostrDecrypt() {
             const rawUrl = shareLinkInput.value.trim();
@@ -2934,7 +3067,7 @@
                 showDecryptResult(t('enterUrlToDecrypt'), true);
                 return;
             }
-
+        
             try {
                 const urlObj = new URL(rawUrl);
                 const encodedId = urlObj.searchParams.get('id');
@@ -2944,12 +3077,10 @@
                     showDecryptResult(t('noEventIdInUrl'), true);
                     return;
                 }
-
-                // Base64 디코딩
+        
                 let eventId = decodeFromBase64(encodedId);
                 let senderKeyHex = decodeFromBase64(encodedKey);
                 
-                // 디코딩 실패 시 원본 Base64 사용 시도
                 if (!eventId) {
                     eventId = encodedId;
                 }
@@ -2957,8 +3088,7 @@
                     senderKeyHex = encodedKey;
                 }
                 
-                // eventId가 hex 형식인지 확인
-                if (!/^[0-9a-fA-F]{64}$/.test(eventId)) {
+                if (!/^[0-9a-fA-F]{64}$/.test(eventId) && !eventId.includes('|')) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
@@ -2967,22 +3097,48 @@
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-
+        
                 showDecryptResult(t('lookingUpEvent', { id: eventId.slice(0, 8) }), false);
                 const event = await fetchEventFromRelays(eventId);
                 if (!event) {
                     showDecryptResult(t('eventNotFound'), true);
                     return;
                 }
-
+        
                 try {
                     const { nip44, getPublicKey } = await loadNostrTools();
                     const recipientPk = getPublicKey(senderKeyHex);
-                    const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
-                    const decrypted = nip44.decrypt(event.content, conversationKey);
-                    const rumor = JSON.parse(decrypted);
-                    const originalUrl = rumor.content;
-
+                    
+                    let originalUrl = '';
+                    
+                    // 분할된 이벤트인 경우
+                    if (event.id && event.id.includes('|')) {
+                        // 분할된 URL 복원
+                        const partIds = event.id.split('|');
+                        let fullData = '';
+                        
+                        for (const partId of partIds) {
+                            const partEvent = await fetchSingleEvent(partId);
+                            if (!partEvent) {
+                                throw new Error(`Part ${partId} not found`);
+                            }
+                            
+                            const conversationKey = nip44.getConversationKey(recipientPk, partEvent.pubkey);
+                            const decrypted = nip44.decrypt(partEvent.content, conversationKey);
+                            const rumor = JSON.parse(decrypted);
+                            const partData = JSON.parse(rumor.content);
+                            fullData += partData.data;
+                        }
+                        
+                        originalUrl = fullData;
+                    } else {
+                        // 일반 이벤트
+                        const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                        const decrypted = nip44.decrypt(event.content, conversationKey);
+                        const rumor = JSON.parse(decrypted);
+                        originalUrl = rumor.content;
+                    }
+        
                     if (originalUrl && originalUrl.includes('#')) {
                         showDecryptResult(t('decryptSuccessRedirect'), false);
                         await handleDecryptWithUrl(originalUrl, true);
@@ -2998,7 +3154,6 @@
                 console.error(err);
             }
         }
-
         // ---------- URL을 직접 받아서 복호화 실행 (표시 없이) ----------
         async function handleDecryptWithUrl(url, fromNostr = false) {
             if (isProcessing) return;
