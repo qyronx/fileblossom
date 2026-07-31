@@ -3610,25 +3610,7 @@
                             const shareEventId = metadata.shareEventId;
                             const sharePrivateKey = metadata.sharePrivateKey;
                             
-                            // 삭제 확인 메시지
-                            let message = 'Are you sure you want to delete this shared link?\n\n';
-                            if (chunkHashes.length > 0) {
-                                message += `${chunkHashes.length} file chunk(s) will be deleted from Blossom servers.\n`;
-                            }
-                            if (metadata.fileHash) {
-                                message += `File hash: ${metadata.fileHash.substring(0, 16)}...\n`;
-                            }
-                            if (shareEventId) {
-                                message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
-                            }
-                            message += '\nThis action cannot be undone.';
-        
-                            if (!confirm(message)) {
-                                showDecryptResult('Delete cancelled.', true);
-                                const cleanUrl = window.location.pathname + window.location.hash;
-                                window.history.replaceState({}, document.title, cleanUrl);
-                                return;
-                            }
+      
                             
                             //  handleDelete 호출 (분할된 ID 전달) 
                             await handleDelete(
