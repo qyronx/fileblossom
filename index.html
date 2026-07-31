@@ -729,7 +729,9 @@
         ]);
 
         const NOSTR_RELAYS = [
-            'wss://nos.lol'
+            'wss://relay.damus.io',
+            'wss://nos.lol',
+            'wss://relay.nostr.band'
         ];
 
         // ---------- 다국어 (i18n) ----------
@@ -1011,7 +1013,7 @@
             });
             const metadataBytes = new TextEncoder().encode(metadata);
 
-            //  DataView로 명시적 리틀엔디안 4바이트 길이 기록
+            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 기록
             const metadataLengthBytes = new Uint8Array(4);
             new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
 
@@ -1046,45 +1048,22 @@
         }
         // ---------- 복호화 (파일명 복원) ----------
         async function decryptFileWithName(ciphertext, key, iv) {
-            let decrypted;
-            try {
-                const cryptoKey = await crypto.subtle.importKey(
-                    'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
-                );
-                decrypted = await crypto.subtle.decrypt(
-                    { name: 'AES-GCM', iv },
-                    cryptoKey,
-                    ciphertext
-                );
-            } catch (e) {
-                // 키/IV가 틀렸거나 데이터가 손상된 경우 (GCM 인증 실패)
-                throw new Error('복호화 실패: 키 또는 IV가 올바르지 않거나 데이터가 손상되었습니다.');
-            }
-        
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
+            );
+            const decrypted = await crypto.subtle.decrypt(
+                { name: 'AES-GCM', iv },
+                cryptoKey,
+                ciphertext
+            );
             const combined = new Uint8Array(decrypted);
-        
-            if (combined.length < 4) {
-                throw new Error('복호화된 데이터가 너무 짧습니다 (메타데이터 헤더 없음)');
-            }
-        
+
+            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 읽기
             const metadataLength = new DataView(combined.buffer, combined.byteOffset, 4).getUint32(0, true);
-        
-            if (metadataLength <= 0 || metadataLength > combined.length - 4) {
-                throw new Error(`메타데이터 길이가 유효하지 않습니다 (length: ${metadataLength})`);
-            }
-        
             const metadataBytes = combined.slice(4, 4 + metadataLength);
-        
-            let metadata;
-            try {
-                const metadataText = new TextDecoder().decode(metadataBytes);
-                metadata = JSON.parse(metadataText);
-            } catch (e) {
-                throw new Error('메타데이터 JSON 파싱 실패: 키/IV 불일치로 데이터가 깨졌을 수 있습니다.');
-            }
-        
+            const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
             const fileData = combined.slice(4 + metadataLength);
-        
+
             return {
                 filename: metadata.filename,
                 data: fileData,
@@ -1167,41 +1146,42 @@
         }
 
         // ---------- 병렬 업로드 함수 (수정됨) ----------
-        async function uploadToBlossomParallel(encryptedChunks, onChunkProgress, pregenKeys = null) {
-            const totalChunks = encryptedChunks.length;
-            const chunkHashes = new Array(totalChunks);
-            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(totalChunks);
+        async function uploadToBlossomParallel(data, onChunkProgress, pregenKeys = null) {
+            const chunks = splitIntoChunks(data, CHUNK_SIZE);
+            const chunkHashes = new Array(chunks.length);
+            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(chunks.length);
+            const totalChunks = chunks.length;
             let uploadAuthKey = pregenKeys ? pregenKeys.uploadAuthKey : null;
             let uploadedPubkey = pregenKeys ? pregenKeys.uploadedPubkey : null;
-        
 
-            
-            for (let i = 0; i < totalChunks; i++) {
-                const plainChunk = encryptedChunks[i];
+            // 각 청크 업로드를 위한 개별 함수
+            async function uploadSingleChunk(index) {
+                const plainChunk = chunks[index];
                 const pngChunk = embedInPNG(plainChunk);
                 const hash = await sha256(pngChunk);
                 const hashHex = uint8ToHex(hash);
-                chunkHashes[i] = hashHex;
-        
+                chunkHashes[index] = hashHex;
+
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
-                let tempSk = chunkAuthKeys[i];
+                let tempSk = chunkAuthKeys[index];
                 if (!tempSk) {
                     tempSk = generateSecretKey();
-                    chunkAuthKeys[i] = tempSk;
+                    chunkAuthKeys[index] = tempSk;
                 }
                 const tempPk = getPublicKey(tempSk);
-        
-                if (i === 0 && !uploadAuthKey) {
+
+                if (index === 0 && !uploadAuthKey) {
                     uploadAuthKey = tempSk;
                     uploadedPubkey = tempPk;
                 }
-        
+
                 const authEvent = await createAuthEvent(pngChunk, tempSk);
                 const authBase64 = btoa(JSON.stringify(authEvent));
-        
+
                 let uploaded = false;
                 let lastError = null;
-        
+
+                // 모든 서버에 순차적으로 시도 (첫 번째 성공 시 중단)
                 for (const server of BLOSSOM_SERVERS) {
                     try {
                         const resp = await fetch(`${server}/upload`, {
@@ -1220,55 +1200,96 @@
                         break;
                     } catch (err) {
                         lastError = err;
-                        console.warn(`Server ${server} failed for chunk ${i}:`, err.message);
+                        console.warn(`Server ${server} failed for chunk ${index}:`, err.message);
+                        // 실패 시 다음 서버로
                     }
                 }
                 
                 if (!uploaded) {
-                    throw new Error(`청크 ${i} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
+                    throw new Error(`청크 ${index} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
                 }
-        
+
+                // 진행 상황 업데이트 (완료된 청크 수)
+                const completed = chunkHashes.filter(h => h !== undefined && h !== null).length;
                 if (onChunkProgress) {
-                    onChunkProgress(i + 1, totalChunks);
+                    onChunkProgress(completed, totalChunks);
+                }
+                
+                return index;
+            }
+
+            // 청크 인덱스 배열 생성 (0부터 totalChunks-1까지)
+            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
+            const results = [];
+
+            // ★★★ 하나씩 순차적으로 업로드 (병렬 없음) ★★★
+            for (let i = 0; i < chunkIndices.length; i++) {
+                const index = chunkIndices[i];
+                
+                try {
+                    await uploadSingleChunk(index);
+                    results.push(index);
+                } catch (err) {
+                    // 실패한 청크 재시도 (1회)
+                    console.warn(`Chunk ${index} failed, retrying...`, err);
+                    try {
+                        await uploadSingleChunk(index);
+                        results.push(index);
+                    } catch (retryErr) {
+                        throw new Error(`청크 ${index} 업로드 실패 (재시도): ${retryErr.message}`);
+                    }
+                }
+
+            }
+
+            // 모든 청크가 업로드되었는지 확인
+            for (let i = 0; i < chunkHashes.length; i++) {
+                if (!chunkHashes[i]) {
+                    throw new Error(`청크 ${i} 해시 누락`);
                 }
             }
-        
-            // 파일 해시: 청크 해시들을 조합하여 생성 (메모리 효율적)
-            const combinedHashInput = chunkHashes.join('').slice(0, 64);
-            const fileHash = await sha256(new TextEncoder().encode(combinedHashInput));
+
+            const fileHash = await sha256(data);
             const fileHashHex = uint8ToHex(fileHash);
-        
+
+            if (!uploadAuthKey) {
+                if (chunkAuthKeys.length > 0 && chunkAuthKeys[0]) {
+                    uploadAuthKey = chunkAuthKeys[0];
+                    const { getPublicKey } = await loadNostrTools();
+                    uploadedPubkey = getPublicKey(uploadAuthKey);
+                }
+            }
+
             const result = {
                 success: true,
                 hash: fileHashHex,
                 chunkHashes: chunkHashes,
-                totalChunks: totalChunks,
+                totalChunks: chunks.length,
                 server: BLOSSOM_SERVERS[0],
                 uploadAuthKey: uploadAuthKey,
                 uploadedPubkey: uploadedPubkey,
                 chunkAuthKeys: chunkAuthKeys
             };
-        
+
             return result;
         }
-
 
         // ---------- 다운로드 ----------
         async function downloadFromBlossom(hash, chunkHashes) {
             const chunks = [];
-        
+
             for (let i = 0; i < chunkHashes.length; i++) {
                 const chunkHash = chunkHashes[i];
                 let pngData = null;
-        
+
                 for (const server of BLOSSOM_SERVERS) {
                     try {
                         const resp = await fetch(`${server}/${chunkHash}`);
                         if (!resp.ok) continue;
-        
+
                         const buffer = await resp.arrayBuffer();
                         pngData = new Uint8Array(buffer);
-        
+
                         const computed = await sha256(pngData);
                         if (uint8ToHex(computed) !== chunkHash) {
                             console.warn(`Chunk hash mismatch from ${server}`);
@@ -1280,28 +1301,25 @@
                         console.warn(`Download chunk ${i} failed from ${server}:`, e.message);
                     }
                 }
-        
+
                 if (!pngData) {
                     throw new Error(`청크 ${i} 다운로드 실패`);
                 }
-        
+
                 const plainChunk = extractFromPNG(pngData);
                 chunks.push(plainChunk);
             }
-        
+
             const data = assembleChunks(chunks);
-        
-            const combinedHashInput = chunkHashes.join('').slice(0, 64);
-            const computedHash = await sha256(new TextEncoder().encode(combinedHashInput));
-            const computedHashHex = uint8ToHex(computedHash);
-            
-            if (computedHashHex !== hash) {
-                throw new Error(`전체 파일 해시 불일치 (기대: ${hash.slice(0, 16)}..., 실제: ${computedHashHex.slice(0, 16)}...)`);
+
+            const computedHash = await sha256(data);
+            if (uint8ToHex(computedHash) !== hash) {
+                throw new Error('전체 파일 해시 불일치');
             }
-        
+
             return { data };
         }
-        
+
         // ---------- Nostr Gift-wrap ----------
         async function publishGiftWrap(link, recipientPubkey, senderPrivateKey) {
             const { generateSecretKey, getPublicKey, finalizeEvent, nip44 } = await loadNostrTools();
@@ -1315,160 +1333,63 @@
                 senderPk = getPublicKey(senderSk);
             }
             
-            // 링크가 65000바이트를 초과하면 분할
-            const MAX_SIZE = 60000; // 안전 마진
-            const linkBytes = new TextEncoder().encode(link);
+            const rumor = {
+                kind: 1,
+                content: link,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: []
+            };
             
-            let results = [];
-            let eventIds = [];
-            
-            if (linkBytes.length <= MAX_SIZE) {
-                // 일반 경우 (기존 로직)
-                const rumor = {
-                    kind: 1,
-                    content: link,
+            try {
+                const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
+                const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
+                
+                const giftWrapEvent = {
+                    kind: 1059,
+                    pubkey: senderPk,
                     created_at: Math.floor(Date.now() / 1000),
-                    tags: []
+                    tags: [
+                        ['p', recipientPubkey]
+                    ],
+                    content: encryptedContent
                 };
                 
-                try {
-                    const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
-                    const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
-                    
-                    const giftWrapEvent = {
-                        kind: 1059,
-                        pubkey: senderPk,
-                        created_at: Math.floor(Date.now() / 1000),
-                        tags: [
-                            ['p', recipientPubkey]
-                        ],
-                        content: encryptedContent
-                    };
-                    
-                    const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
-                    
-                    // 릴레이에 전송
-                    for (const relay of NOSTR_RELAYS) {
-                        try {
-                            const ws = new WebSocket(relay);
-                            await new Promise((resolve, reject) => {
-                                const timeout = setTimeout(() => {
-                                    ws.close();
-                                    reject(new Error('Timeout'));
-                                }, 5000);
-                                
-                                ws.onopen = () => {
-                                    ws.send(JSON.stringify(['EVENT', signedEvent]));
-                                    clearTimeout(timeout);
-                                    resolve();
-                                };
-                                ws.onerror = () => {
-                                    clearTimeout(timeout);
-                                    reject(new Error(`Relay ${relay} failed`));
-                                };
-                            });
-                        } catch (err) {
-                            console.warn(`Failed to send to ${relay}:`, err.message);
-                        }
-                    }
-                    
-                    return {
-                        eventId: signedEvent.id,
-                        success: true,
-                        results: [{ relay: 'all', success: true }]
-                    };
-                } catch (err) {
-                    console.error('NIP-44 encryption failed:', err);
-                    throw new Error(`암호화 실패: ${err.message}`);
-                }
-            } else {
-                //  URL이 너무 길면 분할 전송 
-                console.warn(`URL too long (${linkBytes.length} bytes), splitting...`);
+                const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
                 
-                const chunkSize = 50000; // 50KB씩 분할
-                const chunks = [];
-                for (let i = 0; i < link.length; i += chunkSize) {
-                    chunks.push(link.slice(i, i + chunkSize));
-                }
-                
-                const totalParts = chunks.length;
-                const partIds = [];
-                
-                for (let i = 0; i < chunks.length; i++) {
-                    const partData = JSON.stringify({
-                        total: totalParts,
-                        index: i,
-                        data: chunks[i]
-                    });
-                    
-                    const rumor = {
-                        kind: 1,
-                        content: partData,
-                        created_at: Math.floor(Date.now() / 1000),
-                        tags: [
-                            ['part', String(i), String(totalParts)]
-                        ]
-                    };
-                    
+                const results = [];
+                for (const relay of NOSTR_RELAYS) {
                     try {
-                        const conversationKey = nip44.getConversationKey(recipientPubkey, senderPk);
-                        const encryptedContent = nip44.encrypt(JSON.stringify(rumor), conversationKey);
-                        
-                        const giftWrapEvent = {
-                            kind: 1059,
-                            pubkey: senderPk,
-                            created_at: Math.floor(Date.now() / 1000),
-                            tags: [
-                                ['p', recipientPubkey],
-                                ['part', String(i), String(totalParts)]
-                            ],
-                            content: encryptedContent
-                        };
-                        
-                        const signedEvent = await finalizeEvent(giftWrapEvent, senderSk);
-                        partIds.push(signedEvent.id);
-                        
-                        // 각 파트 전송
-                        for (const relay of NOSTR_RELAYS) {
-                            try {
-                                const ws = new WebSocket(relay);
-                                await new Promise((resolve, reject) => {
-                                    const timeout = setTimeout(() => {
-                                        ws.close();
-                                        reject(new Error('Timeout'));
-                                    }, 5000);
-                                    
-                                    ws.onopen = () => {
-                                        ws.send(JSON.stringify(['EVENT', signedEvent]));
-                                        clearTimeout(timeout);
-                                        resolve();
-                                    };
-                                    ws.onerror = () => {
-                                        clearTimeout(timeout);
-                                        reject(new Error(`Relay ${relay} failed`));
-                                    };
-                                });
-                            } catch (err) {
-                                console.warn(`Failed to send part ${i} to ${relay}:`, err.message);
-                            }
-                        }
-                        
+                        const ws = new WebSocket(relay);
+                        await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => {
+                                ws.close();
+                                reject(new Error('Timeout'));
+                            }, 5000);
+                            
+                            ws.onopen = () => {
+                                ws.send(JSON.stringify(['EVENT', signedEvent]));
+                                clearTimeout(timeout);
+                                resolve();
+                            };
+                            ws.onerror = () => {
+                                clearTimeout(timeout);
+                                reject(new Error(`Relay ${relay} failed`));
+                            };
+                        });
+                        results.push({ relay, success: true });
                     } catch (err) {
-                        console.error(`Failed to encrypt part ${i}:`, err);
-                        throw new Error(`분할 암호화 실패: ${err.message}`);
+                        results.push({ relay, success: false, error: err.message });
                     }
                 }
-                
-                // 분할된 이벤트 ID들을 하나의 문자열로 결합 (구분자로 | 사용)
-                const combinedEventId = partIds.join('|');
                 
                 return {
-                    eventId: combinedEventId,
-                    success: true,
-                    results: [{ relay: 'all', success: true }],
-                    isSplit: true,
-                    totalParts: totalParts
+                    eventId: signedEvent.id,
+                    success: results.some(r => r.success),
+                    results
                 };
+            } catch (err) {
+                console.error('NIP-44 encryption failed:', err);
+                throw new Error(`암호화 실패: ${err.message}`);
             }
         }
 
@@ -1482,36 +1403,17 @@
 
         function parseShareLink(url) {
             try {
-                const hashPart = url.split('#')[1];
-                if (!hashPart) return null;
-        
-                // 프래그먼트가 URL 인코딩되어 넘어온 경우를 대비해 디코딩 시도
-                let decodedHash = hashPart;
-                try {
-                    decodedHash = decodeURIComponent(hashPart);
-                } catch {
-                    // 디코딩 실패 시 원본 사용 (이미 순수 hex/base64라 문제 없는 경우)
-                }
-        
-                const parts = decodedHash.split(',');
+                const hash = url.split('#')[1];
+                if (!hash) return null;
+                const parts = hash.split(',');
                 if (parts.length < 4) return null;
-        
-                const key = hexToUint8(parts[1]);
-                const iv = hexToUint8(parts[2]);
-        
-                if (!key || !iv || key.length !== 32 || iv.length !== 12) {
-                    console.warn('Invalid key/iv length after decode:', key?.length, iv?.length);
-                    return null;
-                }
-        
                 return {
                     hash: parts[0],
-                    key,
-                    iv,
+                    key: hexToUint8(parts[1]),
+                    iv: hexToUint8(parts[2]),
                     chunkHashes: parts.slice(3)
                 };
-            } catch (e) {
-                console.error('parseShareLink error:', e);
+            } catch {
                 return null;
             }
         }
@@ -1533,7 +1435,7 @@
                 if (hex instanceof Uint8Array) {
                     bytes = hex;
                 } else if (typeof hex === 'string') {
-                    //  문자열인 경우 UTF-8로 인코딩 
+                    // ★★★ 문자열인 경우 UTF-8로 인코딩 ★★★
                     try {
                         // JSON 문자열인지 확인
                         JSON.parse(hex);
@@ -1870,30 +1772,20 @@
 
         
 
-        // ---------- 삭제 함수 (분할 이벤트 완전 지원) ----------
+        // ---------- 삭제 함수 (프론트엔드 직접 실행) - 최종 수정됨 ----------
         async function handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey) {
             if (!eventId || !privateKey) {
                 alert('Error: Missing event ID or private key');
                 return;
             }
-        
+
             showDecryptResult('Decrypting delete request...', false);
-        
+
             try {
                 const nostrTools = await loadNostrTools();
                 const { getPublicKey, finalizeEvent, nip44 } = nostrTools;
-        
-                //  분할된 이벤트 ID 처리 
-                let eventIds = [];
-                if (eventId.includes('|')) {
-                    eventIds = eventId.split('|');
-                } else {
-                    eventIds = [eventId];
-                }
-        
-                // 첫 번째 이벤트만 조회하여 delete URL 복원 (모든 파트가 같은 키로 암호화됨)
-                const firstEventId = eventIds[0];
-                const event = await fetchSingleEvent(firstEventId);
+
+                const event = await fetchEventFromRelays(eventId);
                 if (!event) {
                     showDecryptResult('Event not found on relays.', true);
                     alert('Error: Could not find the delete URL event on relays');
@@ -1903,14 +1795,23 @@
                 // keyHex 추출 (모든 타입 처리)
                 let keyHex = null;
                 try {
+                    // 1. Uint8Array 체크
                     if (privateKey instanceof Uint8Array) {
                         keyHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('');
-                    } else if (Array.isArray(privateKey) && privateKey.every(v => typeof v === 'number' && v >= 0 && v <= 255)) {
+                        console.log('Converted Uint8Array to hex:', keyHex.substring(0, 16) + '...');
+                    }
+                    // 2. 일반 배열 체크 (숫자 배열)
+                    else if (Array.isArray(privateKey) && privateKey.every(v => typeof v === 'number' && v >= 0 && v <= 255)) {
                         keyHex = privateKey.map(b => b.toString(16).padStart(2, '0')).join('');
-                    } else if (typeof privateKey === 'string') {
+                        console.log('Converted number array to hex:', keyHex.substring(0, 16) + '...');
+                    }
+                    // 3. 문자열 체크
+                    else if (typeof privateKey === 'string') {
+                        // 이미 hex 형식인지 확인
                         if (privateKey.length === 64 && /^[0-9a-fA-F]+$/.test(privateKey)) {
                             keyHex = privateKey;
                         } else {
+                            // Base64 디코딩 시도
                             try {
                                 const bytes = decodeFromBase64ToBytes(privateKey);
                                 if (bytes) {
@@ -1919,14 +1820,20 @@
                             } catch (e) {
                                 console.warn('Base64 decode failed, trying as-is:', e);
                             }
+                            
+                            // 그래도 안되면 원본 사용 (혹시 hex인 경우)
                             if (!keyHex && privateKey.length === 64) {
                                 keyHex = privateKey;
                             }
                         }
-                    } else if (privateKey && typeof privateKey === 'object') {
+                    }
+                    // 4. 객체인 경우 (Uint8Array가 아닌 다른 형태)
+                    else if (privateKey && typeof privateKey === 'object') {
+                        // ArrayBuffer나 다른 형태일 수 있음
                         try {
                             const bytes = new Uint8Array(privateKey);
                             keyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+                            console.log('Converted object to hex:', keyHex.substring(0, 16) + '...');
                         } catch (e) {
                             console.warn('Failed to convert object to hex:', e);
                         }
@@ -2021,17 +1928,17 @@
                     message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
                 }
                 message += '\nThis action cannot be undone.';
-        
+
                 if (!confirm(message)) {
                     showDecryptResult('Delete cancelled.', true);
                     return;
                 }
-        
+
                 showDecryptResult('Deleting files... (this may take a few seconds)', false);
-        
+
                 async function createBlossomAuthEvent(authKey, hash, pubkey) {
                     if (!authKey) return null;
-        
+
                     let authSk;
                     if (typeof authKey === 'string') {
                         const bytes = new Uint8Array(authKey.length / 2);
@@ -2046,13 +1953,13 @@
                     } else {
                         return null;
                     }
-        
+
                     let authPk = pubkey;
                     if (!authPk) {
                         authPk = getPublicKey(authSk);
                     }
                     const now = Math.floor(Date.now() / 1000);
-        
+
                     const authEvent = {
                         kind: 24242,
                         pubkey: authPk,
@@ -2064,21 +1971,21 @@
                         ],
                         content: 'Delete Blob'
                     };
-        
+
                     return await finalizeEvent(authEvent, authSk);
                 }
-        
+
                 // 모든 릴레이에 삭제 이벤트 전송
                 async function sendDeleteEventToAllRelays(eventIdToDelete, skHex) {
                     if (!eventIdToDelete || !skHex) return false;
-        
+
                     try {
                         const sk = hexToUint8(skHex);
                         if (!sk) return false;
-        
+
                         const pubkey = getPublicKey(sk);
                         const now = Math.floor(Date.now() / 1000);
-        
+
                         const deleteEvent = {
                             kind: 5,
                             pubkey: pubkey,
@@ -2088,10 +1995,10 @@
                             ],
                             content: ''
                         };
-        
+
                         const signedDeleteEvent = await finalizeEvent(deleteEvent, sk);
                         let sentCount = 0;
-        
+
                         for (const relay of NOSTR_RELAYS) {
                             try {
                                 const ws = new WebSocket(relay);
@@ -2100,7 +2007,7 @@
                                         ws.close();
                                         resolve();
                                     }, 5000);
-        
+
                                     ws.onopen = () => {
                                         ws.send(JSON.stringify(['EVENT', signedDeleteEvent]));
                                         setTimeout(() => {
@@ -2109,7 +2016,7 @@
                                             ws.close();
                                         }, 1000);
                                     };
-        
+
                                     ws.onerror = () => {
                                         clearTimeout(timeout);
                                         resolve();
@@ -2120,20 +2027,20 @@
                                 // Silently continue
                             }
                         }
-        
+
                         return sentCount > 0;
                     } catch (e) {
                         return false;
                     }
                 }
-        
+
                 const blossomServers = BLOSSOM_SERVERS;
                 const authKeyToUse = uploadAuthKeyHex || (chunkAuthKeysHex && chunkAuthKeysHex.length > 0 ? chunkAuthKeysHex[0] : null);
                 const pubkeyToUse = uploadedPubkeyHex || null;
-        
+
                 let blossomDeleted = 0;
                 let blossomFailed = 0;
-        
+
                 // 1. Blossom 파일 삭제
                 if (authKeyToUse && chunkHashes.length > 0) {
                     for (let i = 0; i < chunkHashes.length; i++) {
@@ -2142,23 +2049,23 @@
                         if (chunkAuthKeysHex && chunkAuthKeysHex.length > i && chunkAuthKeysHex[i]) {
                             chunkAuthKey = chunkAuthKeysHex[i];
                         }
-        
+
                         let deletedFromAny = false;
-        
+
                         for (const server of blossomServers) {
                             try {
                                 const headResponse = await fetch(`${server}/${chunkHash}`, { method: 'HEAD' });
                                 if (headResponse.status === 404) continue;
-        
+
                                 const authEvent = await createBlossomAuthEvent(chunkAuthKey, chunkHash, pubkeyToUse);
                                 if (!authEvent) continue;
-        
+
                                 const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
                                 const deleteResponse = await fetch(`${server}/${chunkHash}`, {
                                     method: 'DELETE',
                                     headers: { 'Authorization': authHeader }
                                 });
-        
+
                                 if (deleteResponse.ok || deleteResponse.status === 204) {
                                     deletedFromAny = true;
                                     break;
@@ -2167,7 +2074,7 @@
                                 // Silently continue
                             }
                         }
-        
+
                         if (deletedFromAny) {
                             blossomDeleted++;
                         } else {
@@ -2175,8 +2082,8 @@
                         }
                     }
                 }
-        
-                // 2. 공유 URL Nostr 이벤트 삭제 (분할된 경우 모든 파트 삭제)
+
+                // 2. 공유 URL Nostr 이벤트 삭제
                 let shareDeleted = false;
                 if (shareEventId && sharePrivateKey) {
                     showDecryptResult('Deleting share URL from Nostr...', false);
@@ -2205,49 +2112,24 @@
                     }
                     
                     if (shareKeyHex && shareKeyHex.length === 64) {
-                        let shareEventIds = [];
-                        if (shareEventId.includes('|')) {
-                            shareEventIds = shareEventId.split('|');
-                        } else {
-                            shareEventIds = [shareEventId];
-                        }
-                        
-                        let allDeleted = true;
-                        for (const sid of shareEventIds) {
-                            const deleted = await sendDeleteEventToAllRelays(sid, shareKeyHex);
-                            if (!deleted) allDeleted = false;
-                        }
-                        shareDeleted = allDeleted;
+                        shareDeleted = await sendDeleteEventToAllRelays(shareEventId, shareKeyHex);
                     }
                 }
-        
-                // 3. delete URL Nostr 이벤트 삭제 (분할된 경우 모든 파트 삭제)
+
+                // 3. delete URL Nostr 이벤트 삭제
                 let deleteUrlDeleted = false;
                 if (eventId && keyHex) {
                     showDecryptResult('Deleting delete URL from Nostr...', false);
-                    
-                    let deleteEventIds = [];
-                    if (eventId.includes('|')) {
-                        deleteEventIds = eventId.split('|');
-                    } else {
-                        deleteEventIds = [eventId];
-                    }
-                    
-                    let allDeleted = true;
-                    for (const did of deleteEventIds) {
-                        const deleted = await sendDeleteEventToAllRelays(did, keyHex);
-                        if (!deleted) allDeleted = false;
-                    }
-                    deleteUrlDeleted = allDeleted;
+                    deleteUrlDeleted = await sendDeleteEventToAllRelays(eventId, keyHex);
                 }
-        
-                // 4. 현재 URL의 추가 이벤트들도 삭제 (분할된 경우 처리)
+
+                // 4. 현재 URL의 추가 이벤트들도 삭제
                 try {
                     const currentUrlObj = new URL(window.location.href);
                     
                     const currentEncodedId = currentUrlObj.searchParams.get('id');
                     if (currentEncodedId) {
-                        let currentEventId = decodeFromBase64(currentEncodedId);
+                        const currentEventId = decodeFromBase64(currentEncodedId);
                         if (currentEventId && currentEventId !== shareEventId && currentEventId !== eventId) {
                             const currentKey = currentUrlObj.searchParams.get('k');
                             if (currentKey) {
@@ -2270,23 +2152,17 @@
                                     console.warn('Failed to decode current key:', e);
                                 }
                                 if (currentKeyHex && currentKeyHex.length === 64) {
-                                    let currentEventIds = [];
-                                    if (currentEventId.includes('|')) {
-                                        currentEventIds = currentEventId.split('|');
-                                    } else {
-                                        currentEventIds = [currentEventId];
-                                    }
-                                    for (const cid of currentEventIds) {
-                                        await sendDeleteEventToAllRelays(cid, currentKeyHex);
-                                    }
+                                    await sendDeleteEventToAllRelays(currentEventId, currentKeyHex);
                                 }
                             }
                         }
                     }
+                    
+                    
                 } catch (e) {
                     // Silently continue
                 }
-        
+
                 // 결과 표시
                 let resultMsg = '';
                 if (blossomDeleted > 0 && (shareDeleted || deleteUrlDeleted)) {
@@ -2304,7 +2180,7 @@
                     showDecryptResult(resultMsg, true);
                     alert(resultMsg);
                 }
-        
+
             } catch (err) {
                 const errorMsg = `Delete failed: ${err.message}`;
                 showDecryptResult(errorMsg, true);
@@ -2325,7 +2201,7 @@
                     return bytes;
                 }
                 try {
-                    //  Buffer 대신 atob 사용 
+                    // ★★★ Buffer 대신 atob 사용 ★★★
                     const binary = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
                     const bytes = new Uint8Array(binary.length);
                     for (let i = 0; i < binary.length; i++) {
@@ -2420,7 +2296,7 @@
                             ['x', hash],
                             ['expiration', (now + 300).toString()]
                         ],
-                        content: 'Delete Blob' //  빈 문자열 방지
+                        content: 'Delete Blob' // ★ 빈 문자열 방지
                     };
                     return await finalizeEvent(authEvent, authSk);
                 }
@@ -2457,7 +2333,7 @@
                         }
                     }
                 }
-                //  image.nostr.build 전용 삭제 로직 제거함 (primal/24242.io와 무관한 구서비스 API)
+                // ★ image.nostr.build 전용 삭제 로직 제거함 (primal/24242.io와 무관한 구서비스 API)
             } catch (err) {
                 console.warn('deleteBlossomFiles failed:', err);
             }
@@ -2466,129 +2342,36 @@
         window.selfDeleteAfterDownload = selfDeleteAfterDownload;
         window.handleDelete = handleDelete;
         window.decodeFromBase64ToBytes = decodeFromBase64ToBytes;
-        // ---------- 스트리밍 방식으로 파일 읽기 + 암호화 ----------
-        async function processFileStream(file, onProgress) {
-            const chunkSize = 10 * 1024 * 1024; // 10MB
-            const totalSize = file.size;
-            let offset = 0;
-            const encryptedChunks = [];
-            const key = crypto.getRandomValues(new Uint8Array(32));
-            const iv = crypto.getRandomValues(new Uint8Array(12));
-            
-            // 전체 파일을 읽으면서 바로 암호화
-            while (offset < totalSize) {
-                const end = Math.min(offset + chunkSize, totalSize);
-                const chunk = file.slice(offset, end);
-                const buffer = await chunk.arrayBuffer();
-                const chunkData = new Uint8Array(buffer);
-                
-                // 암호화 (청크 단위로)
-                const encryptedChunk = await encryptChunk(chunkData, key, iv);
-                encryptedChunks.push(encryptedChunk);
-                
-                offset = end;
-                
-                if (onProgress) {
-                    const progress = (offset / totalSize) * 100;
-                    onProgress(progress, offset, totalSize);
-                }
-            }
-            
-            //  암호화된 청크를 합치지 않고 그대로 반환 
-            return {
-                encryptedChunks: encryptedChunks,  // 배열로 반환
-                key,
-                iv,
-                totalChunks: encryptedChunks.length
-            };
-        }
-        
-        // ---------- 청크 단위 암호화 ----------
-        async function encryptChunk(data, key, iv) {
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
-            );
-            const encrypted = await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv },
-                cryptoKey,
-                data
-            );
-            return new Uint8Array(encrypted);
-        }
-        
-        // ---------- 스트리밍 방식 암호화----------
-        async function encryptFileWithNameStream(fileData, file, autoDelete = false, deleteKeys = null) {
-            const key = crypto.getRandomValues(new Uint8Array(32));
-            const iv = crypto.getRandomValues(new Uint8Array(12));
-        
-            const metadata = JSON.stringify({
-                filename: file.name,
-                size: file.size,
-                type: file.type,
-                autoDelete: !!autoDelete,
-                deleteKeys: autoDelete && deleteKeys ? deleteKeys : null
-            });
-            const metadataBytes = new TextEncoder().encode(metadata);
-        
-            const metadataLengthBytes = new Uint8Array(4);
-            new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
-        
-            const combined = new Uint8Array(4 + metadataBytes.length + fileData.length);
-            combined.set(metadataLengthBytes, 0);
-            combined.set(metadataBytes, 4);
-            combined.set(fileData, 4 + metadataBytes.length);
-        
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
-            );
-            const encrypted = await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv },
-                cryptoKey,
-                combined
-            );
-            return {
-                ciphertext: new Uint8Array(encrypted),
-                key,
-                iv
-            };
-        }
-        
-        // ---------- handleFile 함수 (스트리밍 방식 적용, 용량 제한 없음) ----------
+        // ---------- 파일 업로드 처리 + 자동 Nostr 단축 (수정됨) ----------
         async function handleFile(file) {
             hideProgress();
             resultBox.style.display = 'none';
             decryptResult.innerHTML = '';
-        
+
             try {
-                setProgress(0, t('readingFile'));
+                setProgress(5, t('readingFile'));
                 currentFilename = file.name;
-        
-                //  파일을 읽으면서 암호화하고, 합치지 않음 
-                let encryptionResult;
-                try {
-                    encryptionResult = await processFileStream(file, (progress, loaded, total) => {
-                        const percent = (progress / 100) * 30;
-                        setProgress(percent, `Reading & Encrypting... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
-                    });
-                } catch (err) {
-                    throw new Error(`파일 처리 실패: ${err.message}`);
-                }
-        
-                const { encryptedChunks, key, iv, totalChunks } = encryptionResult;
-                setProgress(40, t('encryptDone'));
-        
-                // 자동삭제 키 생성
+
+                // ★ 자동삭제가 켜져 있으면, 암호화 전에 삭제용 키를 미리 생성해서 메타데이터에 넣는다
                 let pregenKeys = null;
                 let deleteKeysForMeta = null;
                 if (autoDeleteEnabled) {
-                    pregenKeys = await pregenerateDeleteKeys(totalChunks);
+                    const totalChunksEstimate = Math.ceil(file.size / CHUNK_SIZE) || 1;
+                    pregenKeys = await pregenerateDeleteKeys(totalChunksEstimate);
                     deleteKeysForMeta = {
                         uploadAuthKey: Array.from(pregenKeys.uploadAuthKey),
                         uploadedPubkey: pregenKeys.uploadedPubkey,
                         chunkAuthKeys: pregenKeys.chunkAuthKeys.map(k => Array.from(k))
                     };
                 }
-        
+
+                setProgress(15, t('encrypting'));
+                const { ciphertext, key, iv } = await encryptFileWithName(file, autoDeleteEnabled, deleteKeysForMeta);
+                setProgress(40, t('encryptDone'));
+
+                const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
+
+                // ★ 암호화 후 실제 청크 개수가 예상과 다를 경우를 대비해 키 배열 길이를 맞춘다
                 if (pregenKeys && pregenKeys.chunkAuthKeys.length !== totalChunks) {
                     const { generateSecretKey, getPublicKey } = await loadNostrTools();
                     const adjustedKeys = [];
@@ -2599,47 +2382,46 @@
                     pregenKeys.uploadAuthKey = adjustedKeys[0];
                     pregenKeys.uploadedPubkey = getPublicKey(adjustedKeys[0]);
                 }
-        
+
                 setProgress(50, t('uploadingBlossom'), 0, totalChunks);
-        
-                //  암호화된 청크를 바로 업로드 (합치지 않음) 
-                const uploadResult = await uploadToBlossomParallel(encryptedChunks, (current, total) => {
+
+                const uploadResult = await uploadToBlossomParallel(ciphertext, (current, total) => {
                     const percent = 50 + (current / total) * 40;
                     setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
                 }, pregenKeys);
-        
+
                 setProgress(90, t('uploadDoneLinking'));
-        
-                // 공유 URL 생성
+
+                // ★ 공유 URL에는 자동삭제 관련 정보를 절대 포함하지 않는다 (원본 로직 그대로)
                 const fullShareLink = createShareLink(
                     uploadResult.hash,
                     key,
                     iv,
                     uploadResult.chunkHashes
                 );
-        
+
                 setProgress(95, t('shorteningNostr'));
-        
+
                 // ============================================================
-                // Nostr 단축 로직 (기존과 동일)
+                // ★★★ 항상 단일 URL로만 단축 (분할 로직 제거) ★★★
                 // ============================================================
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
                 const shareSenderSk = generateSecretKey();
                 const shareSenderPk = getPublicKey(shareSenderSk);
                 const shareRecipientPk = shareSenderPk;
-        
+
                 const deleteSenderSk = generateSecretKey();
                 const deleteSenderPk = getPublicKey(deleteSenderSk);
                 const deleteRecipientPk = deleteSenderPk;
-        
+
                 let shortUrls = [];
                 let allShortened = true;
                 let uploadAuthKeyEncoded = null;
                 let chunkAuthKeysEncoded = null;
-        
+
                 try {
                     const shareResult = await publishGiftWrap(fullShareLink, shareRecipientPk, shareSenderSk);
-        
+
                     const deleteMetadata = {
                         fileHash: uploadResult.hash,
                         chunkHashes: uploadResult.chunkHashes,
@@ -2653,31 +2435,31 @@
                     };
                     const deleteMetadataJson = JSON.stringify(deleteMetadata);
                     const deleteMetadataEncoded = encodeToBase64(deleteMetadataJson);
-        
+
                     const fullDeleteUrl = new URL(window.location.href);
                     fullDeleteUrl.search = '';
                     fullDeleteUrl.searchParams.set('delete', 'true');
                     fullDeleteUrl.searchParams.set('m', deleteMetadataEncoded);
-        
+
                     const deleteResult = await publishGiftWrap(fullDeleteUrl.toString(), deleteRecipientPk, deleteSenderSk);
-        
+
                     if (shareResult.success && deleteResult.success) {
                         const shareEncodedId = encodeToBase64(shareResult.eventId);
                         const shareEncodedKey = encodeToBase64(shareSenderSk);
                         const deleteEncodedId = encodeToBase64(deleteResult.eventId);
                         const deleteEncodedKey = encodeToBase64(deleteSenderSk);
-        
+
                         if (shareEncodedId && shareEncodedKey && deleteEncodedId && deleteEncodedKey) {
                             const shortUrl = new URL(window.location.href);
                             shortUrl.search = '';
                             shortUrl.searchParams.set('id', shareEncodedId);
                             shortUrl.searchParams.set('k', shareEncodedKey);
-        
+
                             const deleteUrl = new URL(window.location.href);
                             deleteUrl.search = '';
                             deleteUrl.searchParams.set('delete', deleteEncodedId);
                             deleteUrl.searchParams.set('k', deleteEncodedKey);
-        
+
                             if (uploadResult.uploadAuthKey) {
                                 uploadAuthKeyEncoded = encodeToBase64(uploadResult.uploadAuthKey);
                             }
@@ -2689,7 +2471,7 @@
                                     return key;
                                 });
                             }
-        
+
                             shortUrls = [{
                                 original: fullShareLink,
                                 short: shortUrl.toString(),
@@ -2756,11 +2538,10 @@
                     }];
                     allShortened = false;
                 }
-        
+
                 setProgress(100, t('allDone'));
                 setTimeout(hideProgress, 1500);
-        
-                // 결과 표시
+
                 let linkHtml = `
                     <div class="flex-between">
                         <span class="text-green">${t('uploadSuccess')}</span>
@@ -2770,7 +2551,7 @@
                         <br>${t('chunkCount', { count: uploadResult.totalChunks, mb: CHUNK_SIZE/1024/1024 })}
                     </div>
                 `;
-        
+
                 if (shortUrls.length > 0 && allShortened) {
                     const deleteUrlHtml = shortUrls[0].deleteUrl ? `
                     <div style="margin-top:8px;display:flex;gap:8px;align-items:center;border-top:1px solid #30363d;padding-top:8px;">
@@ -2780,7 +2561,7 @@
                         <button class="btn delete-btn" style="font-size:11px;padding:4px 12px;background:#da3633;">Delete</button>
                     </div>
                     ` : '';
-        
+
                     linkHtml += `
                         <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #238636;">
                             <span class="text-green">${t('shareUrl')}</span>
@@ -2806,12 +2587,13 @@
                         </div>
                     `;
                 }
-        
+
                 showResult(linkHtml);
-        
-                // 이벤트 리스너 설정
+
+                // 이벤트 리스너 설정 (분할 URL 관련 핸들러 제거됨)
                 if (!window._deleteEventsAttached) {
                     resultBox.addEventListener('click', async function(e) {
+                        // Copy 버튼
                         if (e.target.classList.contains('copy-delete-btn')) {
                             const input = document.getElementById('deleteUrlInput');
                             if (input) {
@@ -2826,7 +2608,8 @@
                                 });
                             }
                         }
-        
+
+                        // Delete 버튼
                         if (e.target.classList.contains('delete-btn')) {
                             const deleteUrl = document.getElementById('deleteUrlInput')?.value;
                             if (deleteUrl) {
@@ -2836,12 +2619,12 @@
                                 btn.disabled = true;
                                 btn.style.opacity = '0.6';
                                 btn.style.cursor = 'wait';
-        
+
                                 try {
                                     const urlObj = new URL(deleteUrl);
                                     const encodedId = urlObj.searchParams.get('delete');
                                     const encodedKey = urlObj.searchParams.get('k');
-        
+
                                     if (encodedId && encodedKey) {
                                         const eventId = decodeFromBase64(encodedId);
                                         let privateKey = null;
@@ -2849,14 +2632,14 @@
                                         if (bytes) {
                                             privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
                                         }
-        
+
                                         if (eventId && privateKey && privateKey.length === 64) {
                                             let uploadAuthKey = null;
                                             let chunkAuthKeys = null;
                                             let allChunkHashes = null;
                                             let fileHash = null;
                                             let uploadedPubkey = null;
-        
+
                                             if (typeof shortUrls !== 'undefined' && shortUrls.length > 0 && shortUrls[0].success) {
                                                 uploadAuthKey = shortUrls[0].uploadAuthKey || null;
                                                 chunkAuthKeys = shortUrls[0].chunkAuthKeys || null;
@@ -2864,7 +2647,7 @@
                                                 fileHash = shortUrls[0].fileHash || null;
                                                 uploadedPubkey = shortUrls[0].uploadedPubkey || null;
                                             }
-        
+
                                             await handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey);
                                         } else {
                                             alert('Error: Failed to decode event ID or private key');
@@ -2887,8 +2670,8 @@
                     });
                     window._deleteEventsAttached = true;
                 }
-        
-                // 버튼 이벤트 리스너들
+
+                // 기존 버튼 이벤트 리스너들
                 document.getElementById('copyShortBtn')?.addEventListener('click', () => {
                     const input = document.getElementById('shortUrlInput');
                     if (input) {
@@ -2904,7 +2687,7 @@
                         });
                     }
                 });
-        
+
                 document.getElementById('downloadShortTxtBtn')?.addEventListener('click', () => {
                     const content = shortUrls[0].short;
                     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
@@ -2917,7 +2700,7 @@
                     document.body.removeChild(a);
                     setTimeout(() => URL.revokeObjectURL(url), 5000);
                 });
-        
+
                 document.getElementById('copyFallbackBtn')?.addEventListener('click', () => {
                     const input = document.getElementById('fallbackLink');
                     if (input) {
@@ -2933,9 +2716,9 @@
                         });
                     }
                 });
-        
+
                 shareLinkInput.value = shortUrls.length > 0 && shortUrls[0].success ? shortUrls[0].short : fullShareLink;
-        
+
             } catch (err) {
                 hideProgress();
                 showResult(`
@@ -2945,8 +2728,6 @@
                 console.error(err);
             }
         }
-
-        
 
         function setProgress(percent, label, currentChunk, totalChunks) {
             progressWrap.style.display = 'block';
@@ -3024,50 +2805,10 @@
 
         // ---------- 이벤트 조회 ----------
         async function fetchEventFromRelays(eventId) {
-            // 분할된 이벤트 ID인지 확인 (| 구분자)
-            if (eventId.includes('|')) {
-                const partIds = eventId.split('|');
-                const parts = [];
-                
-                for (const partId of partIds) {
-                    const event = await fetchSingleEvent(partId);
-                    if (!event) {
-                        console.warn(`Part ${partId} not found`);
-                        return null;
-                    }
-                    parts.push(event);
-                }
-                
-                // 모든 파트를 조합하여 원본 데이터 복원
-                try {
-                    const { nip44, getPublicKey } = await loadNostrTools();
-                    // 첫 번째 파트에서 sender 키 추출 (모든 파트가 같은 키로 암호화됨)
-                    const firstEvent = parts[0];
-                    // 복호화 시도 (키는 외부에서 전달됨)
-                    // 여기서는 복호화를 위해 임시로 처리
-                    return {
-                        id: eventId,
-                        kind: 1059,
-                        pubkey: firstEvent.pubkey,
-                        content: JSON.stringify({
-                            isSplit: true,
-                            parts: parts.length,
-                            partIds: partIds
-                        }),
-                        tags: [['p', firstEvent.pubkey]]
-                    };
-                } catch (err) {
-                    console.error('Failed to combine split events:', err);
-                    return null;
-                }
-            }
-            
-            return fetchSingleEvent(eventId);
-        }
-        // ---------- 단일 이벤트 조회 ----------
-        async function fetchSingleEvent(eventId) {
+            // eventId가 이미 hex 형식인지 확인 (64자리 16진수)
             const isHex = /^[0-9a-fA-F]{64}$/.test(eventId);
             
+            // hex가 아니면 Base64 디코딩 시도
             let hexEventId = eventId;
             if (!isHex) {
                 const decoded = decodeFromBase64(eventId);
@@ -3089,8 +2830,9 @@
                             ws.close();
                             reject(new Error(`Timeout from ${relay}`));
                         }, 10000);
-        
+
                         ws.onopen = () => {
+                            // 올바른 REQ 형식 사용
                             const reqMsg = JSON.stringify(['REQ', 'get-event', { ids: [hexEventId] }]);
                             console.log(`Sending to ${relay}:`, reqMsg);
                             ws.send(reqMsg);
@@ -3109,6 +2851,7 @@
                                     resolve(null);
                                     ws.close();
                                 }
+                                // CLOSED 메시지 처리
                                 if (msg[0] === 'CLOSED') {
                                     console.warn(`Relay ${relay} closed subscription:`, msg);
                                     clearTimeout(timeout);
@@ -3131,6 +2874,7 @@
             }
             return null;
         }
+
         // ---------- Nostr 복호화 (k 파라미터 자동 처리) ----------
         async function handleNostrDecrypt() {
             const rawUrl = shareLinkInput.value.trim();
@@ -3138,81 +2882,55 @@
                 showDecryptResult(t('enterUrlToDecrypt'), true);
                 return;
             }
-        
+
             try {
                 const urlObj = new URL(rawUrl);
                 const encodedId = urlObj.searchParams.get('id');
                 const encodedKey = urlObj.searchParams.get('k');
-        
+                
                 if (!encodedId || !encodedKey) {
                     showDecryptResult(t('noEventIdInUrl'), true);
                     return;
                 }
-        
+
+                // Base64 디코딩
                 let eventId = decodeFromBase64(encodedId);
                 let senderKeyHex = decodeFromBase64(encodedKey);
-        
-                if (!eventId) eventId = encodedId;
-                if (!senderKeyHex) senderKeyHex = encodedKey;
-        
-                if (!/^[0-9a-fA-F]{64}$/.test(eventId) && !eventId.includes('|')) {
+                
+                // 디코딩 실패 시 원본 Base64 사용 시도
+                if (!eventId) {
+                    eventId = encodedId;
+                }
+                if (!senderKeyHex) {
+                    senderKeyHex = encodedKey;
+                }
+                
+                // eventId가 hex 형식인지 확인
+                if (!/^[0-9a-fA-F]{64}$/.test(eventId)) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-        
+                
                 if (!senderKeyHex || senderKeyHex.length !== 64) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-        
+
                 showDecryptResult(t('lookingUpEvent', { id: eventId.slice(0, 8) }), false);
                 const event = await fetchEventFromRelays(eventId);
                 if (!event) {
                     showDecryptResult(t('eventNotFound'), true);
                     return;
                 }
-        
+
                 try {
                     const { nip44, getPublicKey } = await loadNostrTools();
                     const recipientPk = getPublicKey(senderKeyHex);
-        
-                    let originalUrl = '';
-        
-                    if (event.id && event.id.includes('|')) {
-                        const partIds = event.id.split('|');
-                        let fullData = '';
-        
-                        for (const partId of partIds) {
-                            const partEvent = await fetchSingleEvent(partId);
-                            if (!partEvent) {
-                                throw new Error(`Part ${partId} not found`);
-                            }
-        
-                            const conversationKey = nip44.getConversationKey(recipientPk, partEvent.pubkey);
-                            let decrypted;
-                            try {
-                                decrypted = nip44.decrypt(partEvent.content, conversationKey);
-                            } catch (e) {
-                                throw new Error(`분할 이벤트 복호화 실패 (${partId.slice(0,8)}): ${e.message}`);
-                            }
-                            const rumor = JSON.parse(decrypted);
-                            const partData = JSON.parse(rumor.content);
-                            fullData += partData.data;
-                        }
-        
-                        originalUrl = fullData;
-                    } else {
-                        const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
-                        let decrypted;
-                        try {
-                            decrypted = nip44.decrypt(event.content, conversationKey);
-                        } catch (e) {
-                            throw new Error(`nip44 복호화 실패: 발신자 키가 이 이벤트와 맞지 않거나 데이터가 손상됨 (${e.message})`);
-                        }
-                        const rumor = JSON.parse(decrypted);
-                        originalUrl = rumor.content;
-                    }
-        
+                    const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                    const decrypted = nip44.decrypt(event.content, conversationKey);
+                    const rumor = JSON.parse(decrypted);
+                    const originalUrl = rumor.content;
+
                     if (originalUrl && originalUrl.includes('#')) {
                         showDecryptResult(t('decryptSuccessRedirect'), false);
                         await handleDecryptWithUrl(originalUrl, true);
@@ -3221,13 +2939,14 @@
                     }
                 } catch (err) {
                     showDecryptResult(t('decryptFail', { err: err.message }), true);
-                    console.error('handleNostrDecrypt error:', err);
+                    console.error(err);
                 }
             } catch (err) {
                 showDecryptResult(t('errorGeneric', { err: err.message }), true);
-                console.error('handleNostrDecrypt outer error:', err);
+                console.error(err);
             }
         }
+
         // ---------- URL을 직접 받아서 복호화 실행 (표시 없이) ----------
         async function handleDecryptWithUrl(url, fromNostr = false) {
             if (isProcessing) return;
@@ -3260,7 +2979,7 @@
                     showDecryptResult(t('decrypting'), false);
                     const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
 
-                    //  autoDelete 처리 - fromNostr이 true일 때만 실행 
+                    // ★★★ autoDelete 처리 - fromNostr이 true일 때만 실행 ★★★
                     if (result.autoDelete && result.deleteKeys && fromNostr) {
                         showDecryptResult('Deleting files...', false);
                         const dk = result.deleteKeys;
@@ -3553,132 +3272,22 @@
             const deleteId = urlParams.get('delete');
             const deleteKey = urlParams.get('k');
             
-            //  삭제 URL 처리 (분할 이벤트 지원) 
             if (deleteId && deleteKey) {
-                // deleteId가 분할된 ID인지 확인 (| 구분자)
-                let eventId = decodeFromBase64(deleteId);
+                const eventId = decodeFromBase64(deleteId);
                 let privateKey = null;
                 const bytes = decodeFromBase64ToBytes(deleteKey);
                 if (bytes) {
                     privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
                 }
                 
-                // decodeFromBase64 실패 시 원본 사용
-                if (!eventId) {
-                    eventId = deleteId;
-                }
-                
-                // privateKey가 hex가 아니면 원본 사용
-                if (privateKey && privateKey.length !== 64) {
-                    privateKey = deleteKey;
-                }
-                
                 if (eventId && privateKey && privateKey.length === 64) {
                     showDecryptResult('Processing delete request...', false);
                     
                     setTimeout(async () => {
-                        try {
-                            //  분할된 이벤트 ID 처리 
-                            let eventIds = [];
-                            if (eventId.includes('|')) {
-                                eventIds = eventId.split('|');
-                            } else {
-                                eventIds = [eventId];
-                            }
-                            
-                            // 첫 번째 이벤트로 delete URL 복원
-                            const firstEventId = eventIds[0];
-                            const event = await fetchSingleEvent(firstEventId);
-                            
-                            if (!event) {
-                                showDecryptResult('❌ Delete URL event not found on relays.', true);
-                                alert('Error: Could not find the delete URL event on relays');
-                                const cleanUrl = window.location.pathname + window.location.hash;
-                                window.history.replaceState({}, document.title, cleanUrl);
-                                return;
-                            }
-                            
-                            // delete URL 복호화
-                            const nostrTools = await loadNostrTools();
-                            const { getPublicKey, nip44 } = nostrTools;
-                            const recipientPk = getPublicKey(privateKey);
-                            const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
-                            const decrypted = nip44.decrypt(event.content, conversationKey);
-                            const rumor = JSON.parse(decrypted);
-                            const deleteUrl = rumor.content;
-                            
-                            // deleteUrl에서 metadata 추출
-                            const urlObj = new URL(deleteUrl);
-                            const metadataEncoded = urlObj.searchParams.get('m');
-                            
-                            if (!metadataEncoded) {
-                                showDecryptResult('❌ No metadata found in delete URL.', true);
-                                alert('Error: No metadata found');
-                                const cleanUrl = window.location.pathname + window.location.hash;
-                                window.history.replaceState({}, document.title, cleanUrl);
-                                return;
-                            }
-                            
-                            // metadata 디코딩
-                            let metadataJson;
-                            try {
-                                let b64 = metadataEncoded.replace(/-/g, '+').replace(/_/g, '/');
-                                while (b64.length % 4) b64 += '=';
-                                const binary = atob(b64);
-                                const bytes = new Uint8Array(binary.length);
-                                for (let i = 0; i < binary.length; i++) {
-                                    bytes[i] = binary.charCodeAt(i);
-                                }
-                                metadataJson = new TextDecoder().decode(bytes);
-                            } catch (e) {
-                                showDecryptResult('❌ Failed to decode metadata.', true);
-                                alert('Error: Failed to decode metadata');
-                                const cleanUrl = window.location.pathname + window.location.hash;
-                                window.history.replaceState({}, document.title, cleanUrl);
-                                return;
-                            }
-                            
-                            const metadata = JSON.parse(metadataJson);
-                            const chunkHashes = metadata.chunkHashes || [];
-                            const uploadAuthKeyHex = metadata.uploadAuthKey ? 
-                                (Array.isArray(metadata.uploadAuthKey) ? 
-                                    Array.from(metadata.uploadAuthKey).map(b => b.toString(16).padStart(2, '0')).join('') : 
-                                    metadata.uploadAuthKey) : null;
-                            const chunkAuthKeysHex = metadata.chunkAuthKeys ? 
-                                metadata.chunkAuthKeys.map(key => {
-                                    if (Array.isArray(key)) {
-                                        return Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('');
-                                    }
-                                    return key;
-                                }).filter(key => key !== null) : null;
-                            const uploadedPubkeyHex = metadata.uploadedPubkey || null;
-                            const shareEventId = metadata.shareEventId;
-                            const sharePrivateKey = metadata.sharePrivateKey;
-                            
-      
-                            
-                            //  handleDelete 호출 (분할된 ID 전달) 
-                            await handleDelete(
-                                eventId,  // 분할된 ID 그대로 전달
-                                privateKey,
-                                uploadAuthKeyHex,
-                                chunkAuthKeysHex,
-                                chunkHashes,
-                                metadata.fileHash,
-                                uploadedPubkeyHex
-                            );
-                            
-                            // URL 정리
-                            const cleanUrl = window.location.pathname + window.location.hash;
-                            window.history.replaceState({}, document.title, cleanUrl);
-                            
-                        } catch (err) {
-                            showDecryptResult(`❌ Delete failed: ${err.message}`, true);
-                            alert(`Error: ${err.message}`);
-                            console.error(err);
-                            const cleanUrl = window.location.pathname + window.location.hash;
-                            window.history.replaceState({}, document.title, cleanUrl);
-                        }
+                        // ★★★ delete URL은 handleDelete에서 직접 복호화하므로 null 전달 ★★★
+                        await handleDelete(eventId, privateKey, null, null, null, null, null);
+                        const cleanUrl = window.location.pathname + window.location.hash;
+                        window.history.replaceState({}, document.title, cleanUrl);
                     }, 500);
                 } else {
                     showDecryptResult('Invalid delete URL: Failed to decode event ID or private key', true);
@@ -3686,7 +3295,7 @@
                 return;
             }
             
-            // 기존 복호화 처리 (변경 없음)
+            // 기존 복호화 처리
             if (k && encodedId) {
                 shareLinkInput.value = window.location.href;
                 setTimeout(async () => {
