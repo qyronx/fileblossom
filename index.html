@@ -731,7 +731,9 @@
         ]);
 
         const NOSTR_RELAYS = [
-            'wss://nos.lol'
+            'wss://relay.damus.io',
+            'wss://nos.lol',
+            'wss://relay.nostr.band'
         ];
 
         // ---------- 다국어 (i18n) ----------
@@ -1568,7 +1570,7 @@
             while (eventId && keyHex && guard < 1000) {
                 guard++;
                 const event = await fetchEventFromRelays(eventId);
-                if (!event) throw new Error('Gift-wrap event not found');
+                if (!event) throw new Error('Gift-wrap 이벤트를 찾을 수 없습니다');
 
                 const recipientPk = getPublicKey(keyHex);
                 const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
@@ -2673,7 +2675,7 @@
                 // ★★★ 스트리밍 암호화 + 업로드: 파일을 청크 단위로 읽어 그 자리에서 암호화하고 즉시 업로드한다.
                 // 파일 전체나 ciphertext 전체를 메모리에 들고 있지 않으므로 대용량 파일에서도 메모리 에러가 나지 않는다.
                 const uploader = createStreamingUploader((current, total) => {
-                    const percent = 40 + (current / total) * 50;
+                    const percent = 15 + (current / total) * 75;
                     setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
                 }, pregenKeys);
 
@@ -2682,7 +2684,6 @@
                     autoDeleteEnabled,
                     deleteKeysForMeta,
                     async (encryptedChunk, index, totalChunks) => {
-                        setProgress(15 + (index / totalChunks) * 25, t('encrypting'));
                         await uploader.pushChunk(encryptedChunk, index, totalChunks);
                     }
                 );
