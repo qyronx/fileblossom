@@ -1013,7 +1013,7 @@
             });
             const metadataBytes = new TextEncoder().encode(metadata);
 
-            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 기록
+            //  DataView로 명시적 리틀엔디안 4바이트 길이 기록
             const metadataLengthBytes = new Uint8Array(4);
             new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
 
@@ -1058,7 +1058,7 @@
             );
             const combined = new Uint8Array(decrypted);
 
-            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 읽기
+            //  DataView로 명시적 리틀엔디안 4바이트 길이 읽기
             const metadataLength = new DataView(combined.buffer, combined.byteOffset, 4).getUint32(0, true);
             const metadataBytes = combined.slice(4, 4 + metadataLength);
             const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
@@ -1146,42 +1146,40 @@
         }
 
         // ---------- 병렬 업로드 함수 (수정됨) ----------
-        async function uploadToBlossomParallel(data, onChunkProgress, pregenKeys = null) {
-            const chunks = splitIntoChunks(data, CHUNK_SIZE);
-            const chunkHashes = new Array(chunks.length);
-            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(chunks.length);
-            const totalChunks = chunks.length;
+        async function uploadToBlossomParallel(encryptedChunks, onChunkProgress, pregenKeys = null) {
+            const totalChunks = encryptedChunks.length;
+            const chunkHashes = new Array(totalChunks);
+            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(totalChunks);
             let uploadAuthKey = pregenKeys ? pregenKeys.uploadAuthKey : null;
             let uploadedPubkey = pregenKeys ? pregenKeys.uploadedPubkey : null;
-
-            // 각 청크 업로드를 위한 개별 함수
-            async function uploadSingleChunk(index) {
-                const plainChunk = chunks[index];
+        
+            // 각 청크 업로드
+            for (let i = 0; i < totalChunks; i++) {
+                const plainChunk = encryptedChunks[i];
                 const pngChunk = embedInPNG(plainChunk);
                 const hash = await sha256(pngChunk);
                 const hashHex = uint8ToHex(hash);
-                chunkHashes[index] = hashHex;
-
+                chunkHashes[i] = hashHex;
+        
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
-                let tempSk = chunkAuthKeys[index];
+                let tempSk = chunkAuthKeys[i];
                 if (!tempSk) {
                     tempSk = generateSecretKey();
-                    chunkAuthKeys[index] = tempSk;
+                    chunkAuthKeys[i] = tempSk;
                 }
                 const tempPk = getPublicKey(tempSk);
-
-                if (index === 0 && !uploadAuthKey) {
+        
+                if (i === 0 && !uploadAuthKey) {
                     uploadAuthKey = tempSk;
                     uploadedPubkey = tempPk;
                 }
-
+        
                 const authEvent = await createAuthEvent(pngChunk, tempSk);
                 const authBase64 = btoa(JSON.stringify(authEvent));
-
+        
                 let uploaded = false;
                 let lastError = null;
-
-                // 모든 서버에 순차적으로 시도 (첫 번째 성공 시 중단)
+        
                 for (const server of BLOSSOM_SERVERS) {
                     try {
                         const resp = await fetch(`${server}/upload`, {
@@ -1200,77 +1198,36 @@
                         break;
                     } catch (err) {
                         lastError = err;
-                        console.warn(`Server ${server} failed for chunk ${index}:`, err.message);
-                        // 실패 시 다음 서버로
+                        console.warn(`Server ${server} failed for chunk ${i}:`, err.message);
                     }
                 }
                 
                 if (!uploaded) {
-                    throw new Error(`청크 ${index} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
+                    throw new Error(`청크 ${i} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
                 }
-
-                // 진행 상황 업데이트 (완료된 청크 수)
-                const completed = chunkHashes.filter(h => h !== undefined && h !== null).length;
+        
+                // 진행 상황 업데이트
                 if (onChunkProgress) {
-                    onChunkProgress(completed, totalChunks);
-                }
-                
-                return index;
-            }
-
-            // 청크 인덱스 배열 생성 (0부터 totalChunks-1까지)
-            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
-            const results = [];
-
-            // ★★★ 하나씩 순차적으로 업로드 (병렬 없음) ★★★
-            for (let i = 0; i < chunkIndices.length; i++) {
-                const index = chunkIndices[i];
-                
-                try {
-                    await uploadSingleChunk(index);
-                    results.push(index);
-                } catch (err) {
-                    // 실패한 청크 재시도 (1회)
-                    console.warn(`Chunk ${index} failed, retrying...`, err);
-                    try {
-                        await uploadSingleChunk(index);
-                        results.push(index);
-                    } catch (retryErr) {
-                        throw new Error(`청크 ${index} 업로드 실패 (재시도): ${retryErr.message}`);
-                    }
-                }
-
-            }
-
-            // 모든 청크가 업로드되었는지 확인
-            for (let i = 0; i < chunkHashes.length; i++) {
-                if (!chunkHashes[i]) {
-                    throw new Error(`청크 ${i} 해시 누락`);
+                    onChunkProgress(i + 1, totalChunks);
                 }
             }
-
-            const fileHash = await sha256(data);
+        
+            //  파일 해시: 청크 해시들을 조합하여 생성 (메모리 효율적) 
+            const combinedHashInput = chunkHashes.join('').slice(0, 64);
+            const fileHash = await sha256(new TextEncoder().encode(combinedHashInput));
             const fileHashHex = uint8ToHex(fileHash);
-
-            if (!uploadAuthKey) {
-                if (chunkAuthKeys.length > 0 && chunkAuthKeys[0]) {
-                    uploadAuthKey = chunkAuthKeys[0];
-                    const { getPublicKey } = await loadNostrTools();
-                    uploadedPubkey = getPublicKey(uploadAuthKey);
-                }
-            }
-
+        
             const result = {
                 success: true,
                 hash: fileHashHex,
                 chunkHashes: chunkHashes,
-                totalChunks: chunks.length,
+                totalChunks: totalChunks,
                 server: BLOSSOM_SERVERS[0],
                 uploadAuthKey: uploadAuthKey,
                 uploadedPubkey: uploadedPubkey,
                 chunkAuthKeys: chunkAuthKeys
             };
-
+        
             return result;
         }
 
@@ -1319,7 +1276,7 @@
 
             return { data };
         }
-
+        
         // ---------- Nostr Gift-wrap ----------
         async function publishGiftWrap(link, recipientPubkey, senderPrivateKey) {
             const { generateSecretKey, getPublicKey, finalizeEvent, nip44 } = await loadNostrTools();
@@ -1435,7 +1392,7 @@
                 if (hex instanceof Uint8Array) {
                     bytes = hex;
                 } else if (typeof hex === 'string') {
-                    // ★★★ 문자열인 경우 UTF-8로 인코딩 ★★★
+                    //  문자열인 경우 UTF-8로 인코딩 
                     try {
                         // JSON 문자열인지 확인
                         JSON.parse(hex);
@@ -2201,7 +2158,7 @@
                     return bytes;
                 }
                 try {
-                    // ★★★ Buffer 대신 atob 사용 ★★★
+                    //  Buffer 대신 atob 사용 
                     const binary = atob(key.replace(/-/g, '+').replace(/_/g, '/'));
                     const bytes = new Uint8Array(binary.length);
                     for (let i = 0; i < binary.length; i++) {
@@ -2296,7 +2253,7 @@
                             ['x', hash],
                             ['expiration', (now + 300).toString()]
                         ],
-                        content: 'Delete Blob' // ★ 빈 문자열 방지
+                        content: 'Delete Blob' //  빈 문자열 방지
                     };
                     return await finalizeEvent(authEvent, authSk);
                 }
@@ -2333,7 +2290,7 @@
                         }
                     }
                 }
-                // ★ image.nostr.build 전용 삭제 로직 제거함 (primal/24242.io와 무관한 구서비스 API)
+                //  image.nostr.build 전용 삭제 로직 제거함 (primal/24242.io와 무관한 구서비스 API)
             } catch (err) {
                 console.warn('deleteBlossomFiles failed:', err);
             }
@@ -2342,7 +2299,7 @@
         window.selfDeleteAfterDownload = selfDeleteAfterDownload;
         window.handleDelete = handleDelete;
         window.decodeFromBase64ToBytes = decodeFromBase64ToBytes;
-        // ---------- 스트리밍 방식으로 파일 읽기----------
+        // ---------- 스트리밍 방식으로 파일 읽기 + 암호화 ----------
         async function processFileStream(file, onProgress) {
             const chunkSize = 10 * 1024 * 1024; // 10MB
             const totalSize = file.size;
@@ -2370,19 +2327,12 @@
                 }
             }
             
-            // 모든 암호화된 청크를 하나로 합치기 (여전히 필요)
-            const totalLength = encryptedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let pos = 0;
-            for (const chunk of encryptedChunks) {
-                result.set(chunk, pos);
-                pos += chunk.length;
-            }
-            
+            //  암호화된 청크를 합치지 않고 그대로 반환 
             return {
-                ciphertext: result,
+                encryptedChunks: encryptedChunks,  // 배열로 반환
                 key,
-                iv
+                iv,
+                totalChunks: encryptedChunks.length
             };
         }
         
@@ -2446,34 +2396,31 @@
                 setProgress(0, t('readingFile'));
                 currentFilename = file.name;
         
-                // ★★★ 파일을 읽으면서 바로 암호화 ★★★
+                //  파일을 읽으면서 암호화하고, 합치지 않음 
                 let encryptionResult;
                 try {
                     encryptionResult = await processFileStream(file, (progress, loaded, total) => {
-                        const percent = (progress / 100) * 30; // 전체 진행률의 0-30%
+                        const percent = (progress / 100) * 30;
                         setProgress(percent, `Reading & Encrypting... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
                     });
                 } catch (err) {
                     throw new Error(`파일 처리 실패: ${err.message}`);
                 }
         
-                const { ciphertext, key, iv } = encryptionResult;
+                const { encryptedChunks, key, iv, totalChunks } = encryptionResult;
                 setProgress(40, t('encryptDone'));
         
                 // 자동삭제 키 생성
                 let pregenKeys = null;
                 let deleteKeysForMeta = null;
                 if (autoDeleteEnabled) {
-                    const totalChunksEstimate = Math.ceil(ciphertext.length / CHUNK_SIZE) || 1;
-                    pregenKeys = await pregenerateDeleteKeys(totalChunksEstimate);
+                    pregenKeys = await pregenerateDeleteKeys(totalChunks);
                     deleteKeysForMeta = {
                         uploadAuthKey: Array.from(pregenKeys.uploadAuthKey),
                         uploadedPubkey: pregenKeys.uploadedPubkey,
                         chunkAuthKeys: pregenKeys.chunkAuthKeys.map(k => Array.from(k))
                     };
                 }
-        
-                const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
         
                 if (pregenKeys && pregenKeys.chunkAuthKeys.length !== totalChunks) {
                     const { generateSecretKey, getPublicKey } = await loadNostrTools();
@@ -2488,7 +2435,8 @@
         
                 setProgress(50, t('uploadingBlossom'), 0, totalChunks);
         
-                const uploadResult = await uploadToBlossomParallel(ciphertext, (current, total) => {
+                //  암호화된 청크를 바로 업로드 (합치지 않음) 
+                const uploadResult = await uploadToBlossomParallel(encryptedChunks, (current, total) => {
                     const percent = 50 + (current / total) * 40;
                     setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
                 }, pregenKeys);
@@ -2506,7 +2454,7 @@
                 setProgress(95, t('shorteningNostr'));
         
                 // ============================================================
-                // Nostr 단축 로직
+                // Nostr 단축 로직 (기존과 동일)
                 // ============================================================
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
                 const shareSenderSk = generateSecretKey();
@@ -2694,10 +2642,9 @@
         
                 showResult(linkHtml);
         
-                // 이벤트 리스너 설정 (기존과 동일)
+                // 이벤트 리스너 설정
                 if (!window._deleteEventsAttached) {
                     resultBox.addEventListener('click', async function(e) {
-                        // Copy 버튼
                         if (e.target.classList.contains('copy-delete-btn')) {
                             const input = document.getElementById('deleteUrlInput');
                             if (input) {
@@ -2713,7 +2660,6 @@
                             }
                         }
         
-                        // Delete 버튼
                         if (e.target.classList.contains('delete-btn')) {
                             const deleteUrl = document.getElementById('deleteUrlInput')?.value;
                             if (deleteUrl) {
@@ -2832,6 +2778,7 @@
                 console.error(err);
             }
         }
+
         
 
         function setProgress(percent, label, currentChunk, totalChunks) {
@@ -3084,7 +3031,7 @@
                     showDecryptResult(t('decrypting'), false);
                     const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
 
-                    // ★★★ autoDelete 처리 - fromNostr이 true일 때만 실행 ★★★
+                    //  autoDelete 처리 - fromNostr이 true일 때만 실행 
                     if (result.autoDelete && result.deleteKeys && fromNostr) {
                         showDecryptResult('Deleting files...', false);
                         const dk = result.deleteKeys;
@@ -3389,7 +3336,7 @@
                     showDecryptResult('Processing delete request...', false);
                     
                     setTimeout(async () => {
-                        // ★★★ delete URL은 handleDelete에서 직접 복호화하므로 null 전달 ★★★
+                        //  delete URL은 handleDelete에서 직접 복호화하므로 null 전달 
                         await handleDelete(eventId, privateKey, null, null, null, null, null);
                         const cleanUrl = window.location.pathname + window.location.hash;
                         window.history.replaceState({}, document.title, cleanUrl);
@@ -3400,7 +3347,7 @@
                 return;
             }
             
-            // 기존 복호화 처리
+            // 복호화 처리
             if (k && encodedId) {
                 shareLinkInput.value = window.location.href;
                 setTimeout(async () => {
