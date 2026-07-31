@@ -716,6 +716,8 @@
             'https://cdn.hzrd149.com'
         ];
         const CHUNK_SIZE = 10 * 1024 * 1024;
+        // ★ 공유 URL이 이 바이트 수를 넘으면 분할하여 여러 Gift-wrap으로 전송한다
+        const MAX_URL_BYTES = 50000;
         const PNG_STUB = new Uint8Array([
             0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
             0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -729,9 +731,7 @@
         ]);
 
         const NOSTR_RELAYS = [
-            'wss://relay.damus.io',
-            'wss://nos.lol',
-            'wss://relay.nostr.band'
+            'wss://nos.lol'
         ];
 
         // ---------- 다국어 (i18n) ----------
@@ -998,11 +998,17 @@
             return new Uint8Array(hash);
         }
 
-        // ---------- 암호화 (파일명을 암호화 데이터에 포함) ----------
-        async function encryptFileWithName(file, autoDelete = false, deleteKeys = null) {
-            const fileData = new Uint8Array(await file.arrayBuffer());
+        // ---------- 스트리밍 암호화 (파일 전체를 메모리에 올리지 않음) ----------
+        // 파일을 CHUNK_SIZE 단위로 file.slice()하여 순차적으로 읽고,
+        // 각 평문 청크를 "그 청크만의" AES-GCM으로 즉시 암호화한다 (청크마다 랜덤 IV, 같은 key 재사용).
+        // 첫 청크 앞에는 파일 메타데이터(파일명 등)를 붙여 함께 암호화한다.
+        // 콜백 onPlainChunk(encryptedChunkBytes, index, totalChunks)를 호출해
+        // 암호화된 청크를 바로바로 업로드하도록 하여, 파일 하나를 통째로 들고 있지 않는다.
+        async function encryptFileStreaming(file, autoDelete, deleteKeys, onEncryptedChunk) {
             const key = crypto.getRandomValues(new Uint8Array(32));
-            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
+            );
 
             const metadata = JSON.stringify({
                 filename: file.name,
@@ -1012,29 +1018,58 @@
                 deleteKeys: autoDelete && deleteKeys ? deleteKeys : null
             });
             const metadataBytes = new TextEncoder().encode(metadata);
-
-            // ★ DataView로 명시적 리틀엔디안 4바이트 길이 기록
             const metadataLengthBytes = new Uint8Array(4);
             new DataView(metadataLengthBytes.buffer).setUint32(0, metadataBytes.length, true);
 
-            const combined = new Uint8Array(4 + metadataBytes.length + fileData.length);
-            combined.set(metadataLengthBytes, 0);
-            combined.set(metadataBytes, 4);
-            combined.set(fileData, 4 + metadataBytes.length);
+            const totalChunks = Math.max(1, Math.ceil((4 + metadataBytes.length + file.size) / CHUNK_SIZE));
 
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
-            );
-            const encrypted = await crypto.subtle.encrypt(
-                { name: 'AES-GCM', iv },
-                cryptoKey,
-                combined
-            );
-            return {
-                ciphertext: new Uint8Array(encrypted),
-                key,
-                iv
-            };
+            let offset = 0; // file 내 읽기 offset (메타데이터 제외, 순수 파일 바이트 기준)
+            let index = 0;
+            let prefixPending = new Uint8Array(0); // 아직 청크에 다 못 담은 메타데이터 prefix
+            {
+                const prefix = new Uint8Array(4 + metadataBytes.length);
+                prefix.set(metadataLengthBytes, 0);
+                prefix.set(metadataBytes, 4);
+                prefixPending = prefix;
+            }
+
+            const chunkIVs = [];
+
+            while (offset < file.size || prefixPending.length > 0 || (offset === 0 && file.size === 0 && index === 0)) {
+                const remainingBudget = CHUNK_SIZE - prefixPending.length;
+                let fileSlice = new Uint8Array(0);
+                if (remainingBudget > 0 && offset < file.size) {
+                    const end = Math.min(offset + remainingBudget, file.size);
+                    const blobSlice = file.slice(offset, end);
+                    // ★ 순차적으로 하나의 슬라이스만 읽음 — 전체 파일을 한번에 읽지 않는다
+                    fileSlice = new Uint8Array(await blobSlice.arrayBuffer());
+                    offset = end;
+                }
+
+                const plainChunk = new Uint8Array(prefixPending.length + fileSlice.length);
+                plainChunk.set(prefixPending, 0);
+                plainChunk.set(fileSlice, prefixPending.length);
+                prefixPending = new Uint8Array(0);
+
+                if (plainChunk.length === 0 && offset >= file.size && index > 0) break;
+
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const encrypted = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv },
+                    cryptoKey,
+                    plainChunk
+                );
+                const encryptedChunk = new Uint8Array(encrypted);
+                chunkIVs.push(uint8ToHex(iv));
+
+                await onEncryptedChunk(encryptedChunk, index, totalChunks);
+
+                // 다 읽었으면 다음 while 조건에서 종료되도록
+                index++;
+                if (offset >= file.size) break;
+            }
+
+            return { key, chunkIVs, totalChunks: index };
         }
         async function pregenerateDeleteKeys(totalChunks) {
             const { generateSecretKey, getPublicKey } = await loadNostrTools();
@@ -1046,7 +1081,7 @@
             const uploadedPubkey = getPublicKey(uploadAuthKey);
             return { uploadAuthKey, uploadedPubkey, chunkAuthKeys };
         }
-        // ---------- 복호화 (파일명 복원) ----------
+        // ---------- 복호화 (단일 청크, 하위호환용: 기존 방식 데이터) ----------
         async function decryptFileWithName(ciphertext, key, iv) {
             const cryptoKey = await crypto.subtle.importKey(
                 'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
@@ -1072,6 +1107,74 @@
                 autoDelete: !!metadata.autoDelete,
                 deleteKeys: metadata.deleteKeys || null
             };
+        }
+
+        // ---------- 스트리밍 복호화 (청크를 하나씩 받아 즉시 복호화, Blob으로 조립) ----------
+        // onNeedChunk(index) -> Uint8Array(암호화된 청크 원본, PNG 스터빙 제거된 상태)를 반환해야 함
+        // 반환된 평문 청크들은 Blob 파츠로 누적되어 최종적으로 하나의 Blob으로 조립된다 (다운로드용, 메모리에 전체를 복사하지 않음)
+        async function decryptFileStreaming(totalChunks, key, chunkIVs, onNeedChunk) {
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
+            );
+
+            let filename = null, fileType = '', fileSize = 0, autoDelete = false, deleteKeys = null;
+            const plainParts = []; // Blob 조립용 (ArrayBuffer/Uint8Array 조각들) — 순차적으로만 쌓이고 합쳐서 복사하지 않음
+            let metadataParsed = false;
+            let carry = new Uint8Array(0); // 메타데이터 길이/본문이 청크 경계를 넘는 경우를 대비한 잔여 버퍼
+
+            for (let i = 0; i < totalChunks; i++) {
+                const encryptedChunk = await onNeedChunk(i);
+                const iv = hexToUint8(chunkIVs[i]);
+                const decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv },
+                    cryptoKey,
+                    encryptedChunk
+                );
+                let plainChunk = new Uint8Array(decrypted);
+
+                if (!metadataParsed) {
+                    const combined = carry.length ? concatBytes(carry, plainChunk) : plainChunk;
+                    if (combined.length < 4) {
+                        carry = combined;
+                        continue;
+                    }
+                    const metadataLength = new DataView(combined.buffer, combined.byteOffset, 4).getUint32(0, true);
+                    if (combined.length < 4 + metadataLength) {
+                        carry = combined;
+                        continue;
+                    }
+                    const metadataBytes = combined.slice(4, 4 + metadataLength);
+                    const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
+                    filename = metadata.filename;
+                    fileType = metadata.type;
+                    fileSize = metadata.size;
+                    autoDelete = !!metadata.autoDelete;
+                    deleteKeys = metadata.deleteKeys || null;
+                    metadataParsed = true;
+                    carry = new Uint8Array(0);
+                    plainChunk = combined.slice(4 + metadataLength);
+                }
+
+                if (plainChunk.length > 0) {
+                    plainParts.push(plainChunk);
+                }
+            }
+
+            return {
+                filename,
+                type: fileType,
+                size: fileSize,
+                autoDelete,
+                deleteKeys,
+                parts: plainParts // 호출부에서 new Blob(parts)로 조립 (전체를 하나의 배열로 복사하지 않음)
+            };
+        }
+
+        function concatBytes(a, b) {
+            const out = new Uint8Array(a.length + b.length);
+            out.set(a, 0);
+            out.set(b, a.length);
+            return out;
         }
 
         // ---------- PNG 스터빙 ----------
@@ -1145,19 +1248,19 @@
             return signedEvent;
         }
 
-        // ---------- 병렬 업로드 함수 (수정됨) ----------
-        async function uploadToBlossomParallel(data, onChunkProgress, pregenKeys = null) {
-            const chunks = splitIntoChunks(data, CHUNK_SIZE);
-            const chunkHashes = new Array(chunks.length);
-            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys : new Array(chunks.length);
-            const totalChunks = chunks.length;
+        // ---------- 스트리밍 업로더 ----------
+        // 청크가 암호화되어 만들어지는 즉시(하나씩) 넘겨받아 바로 업로드한다.
+        // data 전체를 미리 들고 있지 않고, 결과 상태(해시 목록 등)만 누적한다.
+        // 전체 파일 무결성 검증은 "모든 청크 해시를 이어붙인 것의 SHA-256"으로 대체한다
+        // (전체 평문/암호문을 다시 메모리에 올려 한 번에 해시하지 않기 위함).
+        function createStreamingUploader(onChunkProgress, pregenKeys = null) {
+            const chunkHashes = [];
+            const chunkAuthKeys = pregenKeys ? pregenKeys.chunkAuthKeys.slice() : [];
             let uploadAuthKey = pregenKeys ? pregenKeys.uploadAuthKey : null;
             let uploadedPubkey = pregenKeys ? pregenKeys.uploadedPubkey : null;
+            let totalChunksKnown = 0;
 
-            // 각 청크 업로드를 위한 개별 함수
-            async function uploadSingleChunk(index) {
-                const plainChunk = chunks[index];
-                const pngChunk = embedInPNG(plainChunk);
+            async function uploadSingleChunk(pngChunk, index) {
                 const hash = await sha256(pngChunk);
                 const hashHex = uint8ToHex(hash);
                 chunkHashes[index] = hashHex;
@@ -1181,7 +1284,6 @@
                 let uploaded = false;
                 let lastError = null;
 
-                // 모든 서버에 순차적으로 시도 (첫 번째 성공 시 중단)
                 for (const server of BLOSSOM_SERVERS) {
                     try {
                         const resp = await fetch(`${server}/upload`, {
@@ -1201,112 +1303,117 @@
                     } catch (err) {
                         lastError = err;
                         console.warn(`Server ${server} failed for chunk ${index}:`, err.message);
-                        // 실패 시 다음 서버로
                     }
                 }
-                
+
                 if (!uploaded) {
                     throw new Error(`청크 ${index} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
                 }
-
-                // 진행 상황 업데이트 (완료된 청크 수)
-                const completed = chunkHashes.filter(h => h !== undefined && h !== null).length;
-                if (onChunkProgress) {
-                    onChunkProgress(completed, totalChunks);
-                }
-                
-                return index;
             }
 
-            // 청크 인덱스 배열 생성 (0부터 totalChunks-1까지)
-            const chunkIndices = Array.from({ length: totalChunks }, (_, i) => i);
-            const results = [];
+            return {
+                // encryptFileStreaming의 onEncryptedChunk 콜백으로 그대로 전달됨
+                async pushChunk(encryptedChunk, index, totalChunks) {
+                    totalChunksKnown = totalChunks;
+                    const pngChunk = embedInPNG(encryptedChunk);
 
-            // ★★★ 하나씩 순차적으로 업로드 (병렬 없음) ★★★
-            for (let i = 0; i < chunkIndices.length; i++) {
-                const index = chunkIndices[i];
-                
-                try {
-                    await uploadSingleChunk(index);
-                    results.push(index);
-                } catch (err) {
-                    // 실패한 청크 재시도 (1회)
-                    console.warn(`Chunk ${index} failed, retrying...`, err);
                     try {
-                        await uploadSingleChunk(index);
-                        results.push(index);
-                    } catch (retryErr) {
-                        throw new Error(`청크 ${index} 업로드 실패 (재시도): ${retryErr.message}`);
+                        await uploadSingleChunk(pngChunk, index);
+                    } catch (err) {
+                        console.warn(`Chunk ${index} failed, retrying...`, err);
+                        await uploadSingleChunk(pngChunk, index); // 1회 재시도, 실패 시 예외 전파
                     }
+
+                    if (onChunkProgress) {
+                        onChunkProgress(index + 1, totalChunks);
+                    }
+                },
+                // 모든 청크 업로드 후 호출: 최종 결과 반환
+                async finalize() {
+                    for (let i = 0; i < chunkHashes.length; i++) {
+                        if (!chunkHashes[i]) {
+                            throw new Error(`청크 ${i} 해시 누락`);
+                        }
+                    }
+
+                    // 전체 파일 해시 대신, 청크 해시들을 순서대로 이어붙인 결합 해시를 파일 무결성 지문으로 사용
+                    const joined = new TextEncoder().encode(chunkHashes.join(','));
+                    const fileHash = await sha256(joined);
+                    const fileHashHex = uint8ToHex(fileHash);
+
+                    if (!uploadAuthKey && chunkAuthKeys.length > 0 && chunkAuthKeys[0]) {
+                        uploadAuthKey = chunkAuthKeys[0];
+                        const { getPublicKey } = await loadNostrTools();
+                        uploadedPubkey = getPublicKey(uploadAuthKey);
+                    }
+
+                    return {
+                        success: true,
+                        hash: fileHashHex,
+                        chunkHashes,
+                        totalChunks: chunkHashes.length,
+                        server: BLOSSOM_SERVERS[0],
+                        uploadAuthKey,
+                        uploadedPubkey,
+                        chunkAuthKeys
+                    };
                 }
-
-            }
-
-            // 모든 청크가 업로드되었는지 확인
-            for (let i = 0; i < chunkHashes.length; i++) {
-                if (!chunkHashes[i]) {
-                    throw new Error(`청크 ${i} 해시 누락`);
-                }
-            }
-
-            const fileHash = await sha256(data);
-            const fileHashHex = uint8ToHex(fileHash);
-
-            if (!uploadAuthKey) {
-                if (chunkAuthKeys.length > 0 && chunkAuthKeys[0]) {
-                    uploadAuthKey = chunkAuthKeys[0];
-                    const { getPublicKey } = await loadNostrTools();
-                    uploadedPubkey = getPublicKey(uploadAuthKey);
-                }
-            }
-
-            const result = {
-                success: true,
-                hash: fileHashHex,
-                chunkHashes: chunkHashes,
-                totalChunks: chunks.length,
-                server: BLOSSOM_SERVERS[0],
-                uploadAuthKey: uploadAuthKey,
-                uploadedPubkey: uploadedPubkey,
-                chunkAuthKeys: chunkAuthKeys
             };
-
-            return result;
         }
 
-        // ---------- 다운로드 ----------
+        // ---------- 다운로드 (한 청크만 받아서 반환 — 스트리밍 복호화용 헬퍼) ----------
+        async function downloadSingleChunk(chunkHash, index) {
+            let pngData = null;
+
+            for (const server of BLOSSOM_SERVERS) {
+                try {
+                    const resp = await fetch(`${server}/${chunkHash}`);
+                    if (!resp.ok) continue;
+
+                    const buffer = await resp.arrayBuffer();
+                    pngData = new Uint8Array(buffer);
+
+                    const computed = await sha256(pngData);
+                    if (uint8ToHex(computed) !== chunkHash) {
+                        console.warn(`Chunk hash mismatch from ${server}`);
+                        pngData = null;
+                        continue;
+                    }
+                    break;
+                } catch (e) {
+                    console.warn(`Download chunk ${index} failed from ${server}:`, e.message);
+                }
+            }
+
+            if (!pngData) {
+                throw new Error(`청크 ${index} 다운로드 실패`);
+            }
+
+            return extractFromPNG(pngData);
+        }
+
+        // ---------- 다운로드 (전체를 메모리에 쌓지 않는 스트리밍 버전) ----------
+        // 청크를 하나씩 받아 onChunk(plainChunk, index)로 즉시 넘긴다 (검증 후 바로 복호화하도록 위임).
+        // 파일 무결성은 청크 해시들을 이어붙인 결합 해시로 검증한다 (업로드 시와 동일한 방식).
+        async function downloadFromBlossomStreaming(hash, chunkHashes, onChunk) {
+            for (let i = 0; i < chunkHashes.length; i++) {
+                const plainChunk = await downloadSingleChunk(chunkHashes[i], i);
+                await onChunk(plainChunk, i);
+            }
+
+            const joined = new TextEncoder().encode(chunkHashes.join(','));
+            const computedHash = await sha256(joined);
+            if (uint8ToHex(computedHash) !== hash) {
+                throw new Error('전체 파일 해시 불일치');
+            }
+        }
+
+        // ---------- 다운로드 (하위호환: 구버전 단일-암호화 방식, 전체를 메모리에 모음) ----------
         async function downloadFromBlossom(hash, chunkHashes) {
             const chunks = [];
 
             for (let i = 0; i < chunkHashes.length; i++) {
-                const chunkHash = chunkHashes[i];
-                let pngData = null;
-
-                for (const server of BLOSSOM_SERVERS) {
-                    try {
-                        const resp = await fetch(`${server}/${chunkHash}`);
-                        if (!resp.ok) continue;
-
-                        const buffer = await resp.arrayBuffer();
-                        pngData = new Uint8Array(buffer);
-
-                        const computed = await sha256(pngData);
-                        if (uint8ToHex(computed) !== chunkHash) {
-                            console.warn(`Chunk hash mismatch from ${server}`);
-                            pngData = null;
-                            continue;
-                        }
-                        break;
-                    } catch (e) {
-                        console.warn(`Download chunk ${i} failed from ${server}:`, e.message);
-                    }
-                }
-
-                if (!pngData) {
-                    throw new Error(`청크 ${i} 다운로드 실패`);
-                }
-
-                const plainChunk = extractFromPNG(pngData);
+                const plainChunk = await downloadSingleChunk(chunkHashes[i], i);
                 chunks.push(plainChunk);
             }
 
@@ -1393,12 +1500,120 @@
             }
         }
 
+        // ---------- 긴 링크 분할 전송 (체이닝 Gift-wrap) ----------
+        // link가 MAX_URL_BYTES(기본 50000바이트)를 넘으면 여러 조각으로 나눠
+        // 각 조각을 별도의 Gift-wrap 이벤트로 발행한다.
+        // 각 조각의 content는 { part, totalParts, data, nextEventId, nextKey(base64) } 형태의 JSON이며,
+        // "다음 조각의 위치(nextEventId/nextKey)"를 자기 자신 안에 담아 체인을 구성한다.
+        // 즉 맨 마지막 조각부터 역순으로 발행해서, 앞 조각이 뒷 조각의 위치를 가리키게 만든다.
+        // 반환값은 항상 "첫 조각"의 { eventId, senderSk, success } — 이 정보만으로 전체를 순차 복원할 수 있다.
+        async function publishGiftWrapChain(link, recipientPubkey, senderPrivateKey) {
+            const linkBytes = new TextEncoder().encode(link);
+
+            // 분할이 필요 없는 경우: 기존과 동일하게 단일 Gift-wrap
+            if (linkBytes.length <= MAX_URL_BYTES) {
+                return await publishGiftWrap(link, recipientPubkey, senderPrivateKey);
+            }
+
+            const { generateSecretKey, getPublicKey } = await loadNostrTools();
+
+            // 문자열을 MAX_URL_BYTES보다 넉넉히 작은 크기로 분할 (JSON 오버헤드 감안)
+            const partSize = Math.floor(MAX_URL_BYTES * 0.6);
+            const parts = [];
+            for (let i = 0; i < link.length; i += partSize) {
+                parts.push(link.slice(i, i + partSize));
+            }
+            const totalParts = parts.length;
+
+            // 뒤에서부터 발행하여 각 조각이 "다음 조각"의 이벤트 위치를 담게 한다
+            let nextEventId = null;
+            let nextKeyEncoded = null;
+
+            for (let i = totalParts - 1; i >= 0; i--) {
+                const isFirst = i === 0;
+                const sk = isFirst ? senderPrivateKey : generateSecretKey();
+                const pk = getPublicKey(sk);
+                const recipientPk = isFirst ? recipientPubkey : pk; // 중간 조각은 자기 자신에게 보냄(발행자만 열 수 있으면 됨)
+
+                const payload = JSON.stringify({
+                    part: i,
+                    totalParts,
+                    data: parts[i],
+                    nextEventId,
+                    nextKey: nextKeyEncoded
+                });
+
+                const result = await publishGiftWrap(payload, recipientPk, sk);
+                if (!result.success) {
+                    throw new Error(`분할 조각 ${i} 전송 실패`);
+                }
+
+                nextEventId = result.eventId;
+                nextKeyEncoded = encodeToBase64(sk);
+
+                if (isFirst) {
+                    return { eventId: result.eventId, success: true, chained: true, totalParts };
+                }
+            }
+        }
+
+        // 체이닝된 Gift-wrap 링크를 처음부터 끝까지 따라가며 원본 문자열을 복원한다.
+        async function resolveGiftWrapChain(firstEventId, firstSenderKeyHex) {
+            const { nip44, getPublicKey } = await loadNostrTools();
+            let eventId = firstEventId;
+            let keyHex = firstSenderKeyHex;
+            let resultStr = null;
+            let guard = 0;
+
+            while (eventId && keyHex && guard < 1000) {
+                guard++;
+                const event = await fetchEventFromRelays(eventId);
+                if (!event) throw new Error('Gift-wrap event not found');
+
+                const recipientPk = getPublicKey(keyHex);
+                const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                const decrypted = nip44.decrypt(event.content, conversationKey);
+                const rumor = JSON.parse(decrypted);
+                const content = rumor.content;
+
+                // 분할되지 않은 단일 링크인 경우
+                if (typeof content === 'string' && !content.startsWith('{')) {
+                    return content;
+                }
+
+                let payload;
+                try {
+                    payload = JSON.parse(content);
+                } catch {
+                    // JSON이 아니면 분할되지 않은 원본 링크
+                    return content;
+                }
+
+                if (typeof payload.data !== 'string' || typeof payload.part !== 'number') {
+                    return content; // 예상 밖 포맷 → 원본 그대로 반환
+                }
+
+                resultStr = (resultStr || '') + payload.data;
+
+                if (payload.nextEventId && payload.nextKey) {
+                    eventId = payload.nextEventId;
+                    const keyBytes = decodeFromBase64ToBytes(payload.nextKey);
+                    keyHex = keyBytes ? Array.from(keyBytes).map(b => b.toString(16).padStart(2, '0')).join('') : null;
+                } else {
+                    break; // 마지막 조각
+                }
+            }
+
+            return resultStr;
+        }
+
         // ---------- 공유 링크 (파일명 제외) ----------
-        function createShareLink(hash, key, iv, chunkHashes) {
+        // 신버전: 청크마다 IV가 다르므로 "chunkHash:iv" 쌍으로 인코딩한다.
+        // 포맷: #hash,keyHex,chunkHash1:iv1,chunkHash2:iv2,...
+        function createShareLink(hash, key, chunkHashes, chunkIVs) {
             const keyHex = uint8ToHex(key);
-            const ivHex = uint8ToHex(iv);
-            const chunkHashesStr = chunkHashes.join(',');
-            return `${window.location.origin}${window.location.pathname}#${hash},${keyHex},${ivHex},${chunkHashesStr}`;
+            const pairsStr = chunkHashes.map((ch, i) => `${ch}:${chunkIVs[i]}`).join(',');
+            return `${window.location.origin}${window.location.pathname}#${hash},${keyHex},${pairsStr}`;
         }
 
         function parseShareLink(url) {
@@ -1406,12 +1621,33 @@
                 const hash = url.split('#')[1];
                 if (!hash) return null;
                 const parts = hash.split(',');
-                if (parts.length < 4) return null;
+                if (parts.length < 3) return null;
+
+                const fileHash = parts[0];
+                const key = hexToUint8(parts[1]);
+                const rest = parts.slice(2);
+
+                // 신버전 포맷 판별: 세 번째 파트부터가 "chunkHash:iv" 쌍인지 확인
+                if (rest.length > 0 && rest[0].includes(':')) {
+                    const chunkHashes = [];
+                    const chunkIVs = [];
+                    for (const pair of rest) {
+                        const [ch, iv] = pair.split(':');
+                        if (!ch || !iv) return null;
+                        chunkHashes.push(ch);
+                        chunkIVs.push(iv);
+                    }
+                    return { hash: fileHash, key, chunkHashes, chunkIVs, legacy: false };
+                }
+
+                // 구버전 포맷 하위호환: hash,keyHex,ivHex,chunkHash1,chunkHash2,...
+                if (rest.length < 2) return null;
                 return {
-                    hash: parts[0],
-                    key: hexToUint8(parts[1]),
-                    iv: hexToUint8(parts[2]),
-                    chunkHashes: parts.slice(3)
+                    hash: fileHash,
+                    key,
+                    iv: hexToUint8(rest[0]),
+                    chunkHashes: rest.slice(1),
+                    legacy: true
                 };
             } catch {
                 return null;
@@ -1926,6 +2162,9 @@
                 }
                 if (shareEventId) {
                     message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
+                    if (metadata.shareChained) {
+                        message += '(This share link was split into multiple linked parts; all parts will be deleted.)\n';
+                    }
                 }
                 message += '\nThis action cannot be undone.';
 
@@ -2083,7 +2322,7 @@
                     }
                 }
 
-                // 2. 공유 URL Nostr 이벤트 삭제
+                // 2. 공유 URL Nostr 이벤트 삭제 (분할 체이닝된 경우 모든 조각을 순회하며 삭제)
                 let shareDeleted = false;
                 if (shareEventId && sharePrivateKey) {
                     showDecryptResult('Deleting share URL from Nostr...', false);
@@ -2112,7 +2351,71 @@
                     }
                     
                     if (shareKeyHex && shareKeyHex.length === 64) {
-                        shareDeleted = await sendDeleteEventToAllRelays(shareEventId, shareKeyHex);
+                        const shareIsChained = !!metadata.shareChained;
+
+                        if (!shareIsChained) {
+                            // 분할되지 않은 단일 Gift-wrap: 기존과 동일하게 한 건만 삭제
+                            shareDeleted = await sendDeleteEventToAllRelays(shareEventId, shareKeyHex);
+                        } else {
+                            // ★ 분할 체이닝된 공유 링크: 첫 조각부터 마지막 조각까지 순회하며
+                            //   각 조각을 복호화해 다음 조각의 위치(nextEventId/nextKey)를 알아낸 뒤,
+                            //   조각마다 kind 5 삭제 이벤트를 발행한다.
+                            let chainEventId = shareEventId;
+                            let chainKeyHex = shareKeyHex;
+                            let chainGuard = 0;
+                            let chainDeletedCount = 0;
+                            let chainTotal = 0;
+
+                            while (chainEventId && chainKeyHex && chainGuard < 1000) {
+                                chainGuard++;
+
+                                const chainEvent = await fetchEventFromRelays(chainEventId);
+                                if (!chainEvent) {
+                                    console.warn('Chain fragment not found on relays, stopping chain walk:', chainEventId);
+                                    break;
+                                }
+
+                                // 이 조각의 payload를 복호화해서 다음 조각 위치를 알아낸다
+                                let nextEventIdInChain = null;
+                                let nextKeyHexInChain = null;
+                                try {
+                                    const chainRecipientPk = getPublicKey(chainKeyHex);
+                                    const chainConversationKey = nip44.getConversationKey(chainRecipientPk, chainEvent.pubkey);
+                                    const chainDecrypted = nip44.decrypt(chainEvent.content, chainConversationKey);
+                                    const chainRumor = JSON.parse(chainDecrypted);
+                                    const chainContent = chainRumor.content;
+
+                                    if (typeof chainContent === 'string' && chainContent.startsWith('{')) {
+                                        const chainPayload = JSON.parse(chainContent);
+                                        if (typeof chainPayload.totalParts === 'number') {
+                                            chainTotal = chainPayload.totalParts;
+                                        }
+                                        if (chainPayload.nextEventId && chainPayload.nextKey) {
+                                            nextEventIdInChain = chainPayload.nextEventId;
+                                            const nextKeyBytes = decodeFromBase64ToBytes(chainPayload.nextKey);
+                                            nextKeyHexInChain = nextKeyBytes ?
+                                                Array.from(nextKeyBytes).map(b => b.toString(16).padStart(2, '0')).join('') :
+                                                null;
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn('Failed to decrypt/parse chain fragment, stopping chain walk:', e);
+                                }
+
+                                // 현재 조각 삭제 (발행 당시 사용된 키 = 현재 조각을 복호화한 키와 동일)
+                                const fragmentDeleted = await sendDeleteEventToAllRelays(chainEventId, chainKeyHex);
+                                if (fragmentDeleted) {
+                                    chainDeletedCount++;
+                                }
+
+                                // 다음 조각으로 이동
+                                chainEventId = nextEventIdInChain;
+                                chainKeyHex = nextKeyHexInChain;
+                            }
+
+                            shareDeleted = chainDeletedCount > 0;
+                            console.log(`Share chain deletion: ${chainDeletedCount}/${chainTotal || '?'} fragment(s) deleted`);
+                        }
                     }
                 }
 
@@ -2366,29 +2669,25 @@
                 }
 
                 setProgress(15, t('encrypting'));
-                const { ciphertext, key, iv } = await encryptFileWithName(file, autoDeleteEnabled, deleteKeysForMeta);
-                setProgress(40, t('encryptDone'));
 
-                const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
-
-                // ★ 암호화 후 실제 청크 개수가 예상과 다를 경우를 대비해 키 배열 길이를 맞춘다
-                if (pregenKeys && pregenKeys.chunkAuthKeys.length !== totalChunks) {
-                    const { generateSecretKey, getPublicKey } = await loadNostrTools();
-                    const adjustedKeys = [];
-                    for (let i = 0; i < totalChunks; i++) {
-                        adjustedKeys.push(pregenKeys.chunkAuthKeys[i] || generateSecretKey());
-                    }
-                    pregenKeys.chunkAuthKeys = adjustedKeys;
-                    pregenKeys.uploadAuthKey = adjustedKeys[0];
-                    pregenKeys.uploadedPubkey = getPublicKey(adjustedKeys[0]);
-                }
-
-                setProgress(50, t('uploadingBlossom'), 0, totalChunks);
-
-                const uploadResult = await uploadToBlossomParallel(ciphertext, (current, total) => {
-                    const percent = 50 + (current / total) * 40;
+                // ★★★ 스트리밍 암호화 + 업로드: 파일을 청크 단위로 읽어 그 자리에서 암호화하고 즉시 업로드한다.
+                // 파일 전체나 ciphertext 전체를 메모리에 들고 있지 않으므로 대용량 파일에서도 메모리 에러가 나지 않는다.
+                const uploader = createStreamingUploader((current, total) => {
+                    const percent = 40 + (current / total) * 50;
                     setProgress(percent, t('uploadingBlossomProgress', { current, total }), current, total);
                 }, pregenKeys);
+
+                const { key, chunkIVs } = await encryptFileStreaming(
+                    file,
+                    autoDeleteEnabled,
+                    deleteKeysForMeta,
+                    async (encryptedChunk, index, totalChunks) => {
+                        setProgress(15 + (index / totalChunks) * 25, t('encrypting'));
+                        await uploader.pushChunk(encryptedChunk, index, totalChunks);
+                    }
+                );
+
+                const uploadResult = await uploader.finalize();
 
                 setProgress(90, t('uploadDoneLinking'));
 
@@ -2396,14 +2695,14 @@
                 const fullShareLink = createShareLink(
                     uploadResult.hash,
                     key,
-                    iv,
-                    uploadResult.chunkHashes
+                    uploadResult.chunkHashes,
+                    chunkIVs
                 );
 
                 setProgress(95, t('shorteningNostr'));
 
                 // ============================================================
-                // ★★★ 항상 단일 URL로만 단축 (분할 로직 제거) ★★★
+                // ★★★ 단축 URL 생성 (5만 바이트 초과 시 자동 분할 체이닝) ★★★
                 // ============================================================
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
                 const shareSenderSk = generateSecretKey();
@@ -2420,7 +2719,9 @@
                 let chunkAuthKeysEncoded = null;
 
                 try {
-                    const shareResult = await publishGiftWrap(fullShareLink, shareRecipientPk, shareSenderSk);
+                    // publishGiftWrapChain: 링크가 길면 자동으로 여러 조각으로 나눠 체이닝 발행하고,
+                    // 항상 "첫 조각"의 eventId 하나만 반환한다 → 그 하나만으로 short URL을 만들 수 있다.
+                    const shareResult = await publishGiftWrapChain(fullShareLink, shareRecipientPk, shareSenderSk);
 
                     const deleteMetadata = {
                         fileHash: uploadResult.hash,
@@ -2431,7 +2732,11 @@
                             key instanceof Uint8Array ? Array.from(key) : key
                         ).filter(key => key !== null) : [],
                         shareEventId: shareResult.eventId,
-                        sharePrivateKey: shareSenderSk ? Array.from(shareSenderSk) : null
+                        sharePrivateKey: shareSenderSk ? Array.from(shareSenderSk) : null,
+                        // ★ 공유 URL이 분할되었다는 사실과, 그걸 풀 때 필요한 키를 삭제 메타데이터에도 남긴다
+                        // → 삭제 시에도 분할된 share 링크의 모든 Gift-wrap 조각을 함께 정리할 수 있게(반영)
+                        shareChained: !!shareResult.chained,
+                        sharePrivateKeyForChain: shareSenderSk ? Array.from(shareSenderSk) : null
                     };
                     const deleteMetadataJson = JSON.stringify(deleteMetadata);
                     const deleteMetadataEncoded = encodeToBase64(deleteMetadataJson);
@@ -2441,7 +2746,8 @@
                     fullDeleteUrl.searchParams.set('delete', 'true');
                     fullDeleteUrl.searchParams.set('m', deleteMetadataEncoded);
 
-                    const deleteResult = await publishGiftWrap(fullDeleteUrl.toString(), deleteRecipientPk, deleteSenderSk);
+                    // 삭제 URL도 (거의 발생하지 않지만) 5만 바이트를 넘을 수 있으므로 동일하게 분할 체이닝 처리
+                    const deleteResult = await publishGiftWrapChain(fullDeleteUrl.toString(), deleteRecipientPk, deleteSenderSk);
 
                     if (shareResult.success && deleteResult.success) {
                         const shareEncodedId = encodeToBase64(shareResult.eventId);
@@ -2778,28 +3084,30 @@
 
 
         // ---------- 파일 청크 분할 다운로드 함수 ----------
-        async function downloadFileAsChunks(data, filename, chunkSize = 10 * 1024 * 1024) {
-            const totalChunks = Math.ceil(data.length / chunkSize);
+        // parts: Uint8Array 조각들의 배열(복호화 결과). 전체를 하나로 합치지 않고
+        // Blob.slice()를 이용해 다운로드용 조각(part)만큼만 잘라 하나씩 저장한다.
+        async function downloadFileAsChunks(parts, filename, chunkSize = 10 * 1024 * 1024) {
+            const fullBlob = new Blob(parts); // 이어붙이기만 함, 배열 복사는 하지 않음
+            const totalSize = fullBlob.size;
+            const totalChunks = Math.ceil(totalSize / chunkSize) || 1;
 
             for (let i = 0; i < totalChunks; i++) {
                 const start = i * chunkSize;
-                const end = Math.min(start + chunkSize, data.length);
-                const chunk = data.slice(start, end);
-                
-                const chunkBlob = new Blob([chunk]);
+                const end = Math.min(start + chunkSize, totalSize);
+                const chunkBlob = fullBlob.slice(start, end);
                 const chunkUrl = URL.createObjectURL(chunkBlob);
-                
+
                 const a = document.createElement('a');
                 a.href = chunkUrl;
                 a.download = `${filename}.part${String(i + 1).padStart(3, '0')}.chunk`;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
-                
+
                 setTimeout(() => URL.revokeObjectURL(chunkUrl), 1000);
                 await new Promise(resolve => setTimeout(resolve, 300));
             }
-            
+
             return totalChunks;
         }
 
@@ -2917,19 +3225,11 @@
                 }
 
                 showDecryptResult(t('lookingUpEvent', { id: eventId.slice(0, 8) }), false);
-                const event = await fetchEventFromRelays(eventId);
-                if (!event) {
-                    showDecryptResult(t('eventNotFound'), true);
-                    return;
-                }
 
                 try {
-                    const { nip44, getPublicKey } = await loadNostrTools();
-                    const recipientPk = getPublicKey(senderKeyHex);
-                    const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
-                    const decrypted = nip44.decrypt(event.content, conversationKey);
-                    const rumor = JSON.parse(decrypted);
-                    const originalUrl = rumor.content;
+                    // ★ resolveGiftWrapChain: 링크가 여러 조각(체이닝)으로 분할 발행되었어도
+                    // 첫 event만으로 자동으로 이어붙여 원본 URL을 복원한다. 분할되지 않은 경우도 동일하게 동작.
+                    const originalUrl = await resolveGiftWrapChain(eventId, senderKeyHex);
 
                     if (originalUrl && originalUrl.includes('#')) {
                         showDecryptResult(t('decryptSuccessRedirect'), false);
@@ -2974,10 +3274,30 @@
 
                 try {
                     showDecryptResult(t('downloadingChunks'), false);
-                    const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
 
-                    showDecryptResult(t('decrypting'), false);
-                    const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
+                    let result;
+                    if (parsed.legacy) {
+                        // 구버전 공유 링크(단일 IV, 전체 일괄 암호화) 하위호환 처리
+                        const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
+                        showDecryptResult(t('decrypting'), false);
+                        const legacyResult = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
+                        result = { ...legacyResult, parts: [legacyResult.data] };
+                    } else {
+                        // 신버전: 청크를 하나씩 다운로드하며 그 자리에서 복호화 (전체를 메모리에 모으지 않음)
+                        showDecryptResult(t('decrypting'), false);
+                        result = await decryptFileStreaming(
+                            parsed.chunkHashes.length,
+                            parsed.key,
+                            parsed.chunkIVs,
+                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i)
+                        );
+                        // 파일 무결성 검증(결합 해시)
+                        const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
+                        const computedHash = await sha256(joined);
+                        if (uint8ToHex(computedHash) !== parsed.hash) {
+                            throw new Error('전체 파일 해시 불일치');
+                        }
+                    }
 
                     // ★★★ autoDelete 처리 - fromNostr이 true일 때만 실행 ★★★
                     if (result.autoDelete && result.deleteKeys && fromNostr) {
@@ -3062,7 +3382,10 @@
                     }
 
                     // 파일 다운로드 로직
-                    const fileSizeMB = result.data.length / (1024 * 1024);
+                    // ★ result.parts는 순차적으로 복호화된 청크 조각들의 배열이다.
+                    // new Blob(parts)는 조각들을 이어붙일 뿐 하나의 거대한 배열로 복사하지 않으므로 메모리 부담이 적다.
+                    const totalBytes = result.parts.reduce((sum, p) => sum + p.length, 0);
+                    const fileSizeMB = totalBytes / (1024 * 1024);
                     if (fileSizeMB > 10) {
                         showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
 
@@ -3077,7 +3400,7 @@
                         decryptResult.innerHTML += downloadHtml;
 
                         document.getElementById('downloadFullBtn2')?.addEventListener('click', () => {
-                            const blob = new Blob([result.data]);
+                            const blob = new Blob(result.parts);
                             const downloadUrl = URL.createObjectURL(blob);
                             const a = document.createElement('a');
                             a.href = downloadUrl;
@@ -3094,7 +3417,7 @@
                     }
 
                     // 일반 파일 다운로드
-                    const blob = new Blob([result.data]);
+                    const blob = new Blob(result.parts);
                     const url2 = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url2;
@@ -3106,7 +3429,7 @@
 
                     showDecryptResult(t('downloadCompleteNamed', {
                         name: result.filename,
-                        size: (result.data.length / 1024).toFixed(1)
+                        size: (totalBytes / 1024).toFixed(1)
                     }), false);
 
                 } catch (err) {
@@ -3162,12 +3485,31 @@
 
                 try {
                     showDecryptResult(t('downloadingChunks'), false);
-                    const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
-                    showDecryptResult(t('decrypting'), false);
-                    
-                    const result = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
-                    
-                    const fileSizeMB = result.data.length / (1024 * 1024);
+
+                    let result;
+                    if (parsed.legacy) {
+                        // 구버전 공유 링크 하위호환
+                        const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
+                        showDecryptResult(t('decrypting'), false);
+                        const legacyResult = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
+                        result = { ...legacyResult, parts: [legacyResult.data] };
+                    } else {
+                        showDecryptResult(t('decrypting'), false);
+                        result = await decryptFileStreaming(
+                            parsed.chunkHashes.length,
+                            parsed.key,
+                            parsed.chunkIVs,
+                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i)
+                        );
+                        const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
+                        const computedHash = await sha256(joined);
+                        if (uint8ToHex(computedHash) !== parsed.hash) {
+                            throw new Error('전체 파일 해시 불일치');
+                        }
+                    }
+
+                    const totalBytes = result.parts.reduce((sum, p) => sum + p.length, 0);
+                    const fileSizeMB = totalBytes / (1024 * 1024);
                     if (fileSizeMB > 10) {
                         showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
                         
@@ -3184,7 +3526,7 @@
                         decryptResult.innerHTML += downloadHtml;
                         
                         document.getElementById('downloadFullBtn')?.addEventListener('click', () => {
-                            const blob = new Blob([result.data]);
+                            const blob = new Blob(result.parts);
                             const url = URL.createObjectURL(blob);
                             const a = document.createElement('a');
                             a.href = url;
@@ -3202,7 +3544,7 @@
                             
                             try {
                                 const totalChunks = await downloadFileAsChunks(
-                                    result.data,
+                                    result.parts,
                                     result.filename || 'file',
                                     10 * 1024 * 1024
                                 );
@@ -3222,7 +3564,7 @@
                         return;
                     }
                     
-                    const blob = new Blob([result.data]);
+                    const blob = new Blob(result.parts);
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
@@ -3234,7 +3576,7 @@
 
                     showDecryptResult(t('downloadCompleteNamed', { 
                         name: result.filename, 
-                        size: (result.data.length / 1024).toFixed(1) 
+                        size: (totalBytes / 1024).toFixed(1) 
                     }), false);
                     
                 } catch (err) {
@@ -3319,9 +3661,11 @@
 
 
         window.__fileblossom = {
-            encryptFileWithName,
+            encryptFileStreaming,
             decryptFileWithName,
-            uploadToBlossomParallel,
+            decryptFileStreaming,
+            createStreamingUploader,
+            downloadFromBlossomStreaming,
             downloadFromBlossom,
             createShareLink,
             parseShareLink,
