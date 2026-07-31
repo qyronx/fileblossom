@@ -798,6 +798,7 @@
                 invalidShareLink: '유효하지 않은 공유 링크입니다.',
                 downloadingBlossom: '⏳ Blossom에서 파일 다운로드 중...',
                 decrypting: '⏳ 복호화 중...',
+                decryptingProgress: '⏳ 복호화 중... ({current}/{total})',
                 decryptDoneSize: '✅ 복호화 완료! ({mb} MB)',
                 fileTooBig: '파일이 큽니다 ({mb} MB)',
                 download: '다운로드',
@@ -893,6 +894,7 @@
                 invalidShareLink: 'This is not a valid share link.',
                 downloadingBlossom: '⏳ Downloading file from Blossom...',
                 decrypting: '⏳ Decrypting...',
+                decryptingProgress: '⏳ Decrypting... ({current}/{total})',
                 decryptDoneSize: '✅ Decryption complete! ({mb} MB)',
                 fileTooBig: 'This file is large ({mb} MB)',
                 download: 'Download',
@@ -1112,7 +1114,7 @@
         // ---------- 스트리밍 복호화 (청크를 하나씩 받아 즉시 복호화, Blob으로 조립) ----------
         // onNeedChunk(index) -> Uint8Array(암호화된 청크 원본, PNG 스터빙 제거된 상태)를 반환해야 함
         // 반환된 평문 청크들은 Blob 파츠로 누적되어 최종적으로 하나의 Blob으로 조립된다 (다운로드용, 메모리에 전체를 복사하지 않음)
-        async function decryptFileStreaming(totalChunks, key, chunkIVs, onNeedChunk) {
+        async function decryptFileStreaming(totalChunks, key, chunkIVs, onNeedChunk, onProgress) {
             const cryptoKey = await crypto.subtle.importKey(
                 'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
             );
@@ -1157,6 +1159,10 @@
 
                 if (plainChunk.length > 0) {
                     plainParts.push(plainChunk);
+                }
+
+                if (onProgress) {
+                    onProgress(i + 1, totalChunks);
                 }
             }
 
@@ -3283,12 +3289,13 @@
                         result = { ...legacyResult, parts: [legacyResult.data] };
                     } else {
                         // 신버전: 청크를 하나씩 다운로드하며 그 자리에서 복호화 (전체를 메모리에 모으지 않음)
-                        showDecryptResult(t('decrypting'), false);
+                        showDecryptResult(t('decryptingProgress', { current: 0, total: parsed.chunkHashes.length }), false);
                         result = await decryptFileStreaming(
                             parsed.chunkHashes.length,
                             parsed.key,
                             parsed.chunkIVs,
-                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i)
+                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i),
+                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false)
                         );
                         // 파일 무결성 검증(결합 해시)
                         const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
@@ -3493,12 +3500,13 @@
                         const legacyResult = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
                         result = { ...legacyResult, parts: [legacyResult.data] };
                     } else {
-                        showDecryptResult(t('decrypting'), false);
+                        showDecryptResult(t('decryptingProgress', { current: 0, total: parsed.chunkHashes.length }), false);
                         result = await decryptFileStreaming(
                             parsed.chunkHashes.length,
                             parsed.key,
                             parsed.chunkIVs,
-                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i)
+                            async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i),
+                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false)
                         );
                         const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
                         const computedHash = await sha256(joined);
