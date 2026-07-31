@@ -1151,7 +1151,8 @@
             let uploadAuthKey = pregenKeys ? pregenKeys.uploadAuthKey : null;
             let uploadedPubkey = pregenKeys ? pregenKeys.uploadedPubkey : null;
         
-            // 각 청크 업로드
+
+            
             for (let i = 0; i < totalChunks; i++) {
                 const plainChunk = encryptedChunks[i];
                 const pngChunk = embedInPNG(plainChunk);
@@ -1204,13 +1205,12 @@
                     throw new Error(`청크 ${i} 업로드 실패: ${lastError?.message || 'Unknown error'}`);
                 }
         
-                // 진행 상황 업데이트
                 if (onChunkProgress) {
                     onChunkProgress(i + 1, totalChunks);
                 }
             }
         
-            //  파일 해시: 청크 해시들을 조합하여 생성 (메모리 효율적) 
+            // 파일 해시: 청크 해시들을 조합하여 생성 (메모리 효율적)
             const combinedHashInput = chunkHashes.join('').slice(0, 64);
             const fileHash = await sha256(new TextEncoder().encode(combinedHashInput));
             const fileHashHex = uint8ToHex(fileHash);
@@ -1229,22 +1229,23 @@
             return result;
         }
 
+
         // ---------- 다운로드 ----------
         async function downloadFromBlossom(hash, chunkHashes) {
             const chunks = [];
-
+        
             for (let i = 0; i < chunkHashes.length; i++) {
                 const chunkHash = chunkHashes[i];
                 let pngData = null;
-
+        
                 for (const server of BLOSSOM_SERVERS) {
                     try {
                         const resp = await fetch(`${server}/${chunkHash}`);
                         if (!resp.ok) continue;
-
+        
                         const buffer = await resp.arrayBuffer();
                         pngData = new Uint8Array(buffer);
-
+        
                         const computed = await sha256(pngData);
                         if (uint8ToHex(computed) !== chunkHash) {
                             console.warn(`Chunk hash mismatch from ${server}`);
@@ -1256,22 +1257,25 @@
                         console.warn(`Download chunk ${i} failed from ${server}:`, e.message);
                     }
                 }
-
+        
                 if (!pngData) {
                     throw new Error(`청크 ${i} 다운로드 실패`);
                 }
-
+        
                 const plainChunk = extractFromPNG(pngData);
                 chunks.push(plainChunk);
             }
-
+        
             const data = assembleChunks(chunks);
-
-            const computedHash = await sha256(data);
-            if (uint8ToHex(computedHash) !== hash) {
-                throw new Error('전체 파일 해시 불일치');
+        
+            const combinedHashInput = chunkHashes.join('').slice(0, 64);
+            const computedHash = await sha256(new TextEncoder().encode(combinedHashInput));
+            const computedHashHex = uint8ToHex(computedHash);
+            
+            if (computedHashHex !== hash) {
+                throw new Error(`전체 파일 해시 불일치 (기대: ${hash.slice(0, 16)}..., 실제: ${computedHashHex.slice(0, 16)}...)`);
             }
-
+        
             return { data };
         }
         
@@ -1824,20 +1828,30 @@
 
         
 
-        // ---------- 삭제 함수 (프론트엔드 직접 실행) - 최종 수정됨 ----------
+        // ---------- 삭제 함수 (분할 이벤트 완전 지원) ----------
         async function handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey) {
             if (!eventId || !privateKey) {
                 alert('Error: Missing event ID or private key');
                 return;
             }
-
+        
             showDecryptResult('Decrypting delete request...', false);
-
+        
             try {
                 const nostrTools = await loadNostrTools();
                 const { getPublicKey, finalizeEvent, nip44 } = nostrTools;
-
-                const event = await fetchEventFromRelays(eventId);
+        
+                //  분할된 이벤트 ID 처리 
+                let eventIds = [];
+                if (eventId.includes('|')) {
+                    eventIds = eventId.split('|');
+                } else {
+                    eventIds = [eventId];
+                }
+        
+                // 첫 번째 이벤트만 조회하여 delete URL 복원 (모든 파트가 같은 키로 암호화됨)
+                const firstEventId = eventIds[0];
+                const event = await fetchSingleEvent(firstEventId);
                 if (!event) {
                     showDecryptResult('Event not found on relays.', true);
                     alert('Error: Could not find the delete URL event on relays');
@@ -1847,23 +1861,14 @@
                 // keyHex 추출 (모든 타입 처리)
                 let keyHex = null;
                 try {
-                    // 1. Uint8Array 체크
                     if (privateKey instanceof Uint8Array) {
                         keyHex = Array.from(privateKey).map(b => b.toString(16).padStart(2, '0')).join('');
-                        console.log('Converted Uint8Array to hex:', keyHex.substring(0, 16) + '...');
-                    }
-                    // 2. 일반 배열 체크 (숫자 배열)
-                    else if (Array.isArray(privateKey) && privateKey.every(v => typeof v === 'number' && v >= 0 && v <= 255)) {
+                    } else if (Array.isArray(privateKey) && privateKey.every(v => typeof v === 'number' && v >= 0 && v <= 255)) {
                         keyHex = privateKey.map(b => b.toString(16).padStart(2, '0')).join('');
-                        console.log('Converted number array to hex:', keyHex.substring(0, 16) + '...');
-                    }
-                    // 3. 문자열 체크
-                    else if (typeof privateKey === 'string') {
-                        // 이미 hex 형식인지 확인
+                    } else if (typeof privateKey === 'string') {
                         if (privateKey.length === 64 && /^[0-9a-fA-F]+$/.test(privateKey)) {
                             keyHex = privateKey;
                         } else {
-                            // Base64 디코딩 시도
                             try {
                                 const bytes = decodeFromBase64ToBytes(privateKey);
                                 if (bytes) {
@@ -1872,20 +1877,14 @@
                             } catch (e) {
                                 console.warn('Base64 decode failed, trying as-is:', e);
                             }
-                            
-                            // 그래도 안되면 원본 사용 (혹시 hex인 경우)
                             if (!keyHex && privateKey.length === 64) {
                                 keyHex = privateKey;
                             }
                         }
-                    }
-                    // 4. 객체인 경우 (Uint8Array가 아닌 다른 형태)
-                    else if (privateKey && typeof privateKey === 'object') {
-                        // ArrayBuffer나 다른 형태일 수 있음
+                    } else if (privateKey && typeof privateKey === 'object') {
                         try {
                             const bytes = new Uint8Array(privateKey);
                             keyHex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-                            console.log('Converted object to hex:', keyHex.substring(0, 16) + '...');
                         } catch (e) {
                             console.warn('Failed to convert object to hex:', e);
                         }
@@ -1980,17 +1979,17 @@
                     message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
                 }
                 message += '\nThis action cannot be undone.';
-
+        
                 if (!confirm(message)) {
                     showDecryptResult('Delete cancelled.', true);
                     return;
                 }
-
+        
                 showDecryptResult('Deleting files... (this may take a few seconds)', false);
-
+        
                 async function createBlossomAuthEvent(authKey, hash, pubkey) {
                     if (!authKey) return null;
-
+        
                     let authSk;
                     if (typeof authKey === 'string') {
                         const bytes = new Uint8Array(authKey.length / 2);
@@ -2005,13 +2004,13 @@
                     } else {
                         return null;
                     }
-
+        
                     let authPk = pubkey;
                     if (!authPk) {
                         authPk = getPublicKey(authSk);
                     }
                     const now = Math.floor(Date.now() / 1000);
-
+        
                     const authEvent = {
                         kind: 24242,
                         pubkey: authPk,
@@ -2023,21 +2022,21 @@
                         ],
                         content: 'Delete Blob'
                     };
-
+        
                     return await finalizeEvent(authEvent, authSk);
                 }
-
+        
                 // 모든 릴레이에 삭제 이벤트 전송
                 async function sendDeleteEventToAllRelays(eventIdToDelete, skHex) {
                     if (!eventIdToDelete || !skHex) return false;
-
+        
                     try {
                         const sk = hexToUint8(skHex);
                         if (!sk) return false;
-
+        
                         const pubkey = getPublicKey(sk);
                         const now = Math.floor(Date.now() / 1000);
-
+        
                         const deleteEvent = {
                             kind: 5,
                             pubkey: pubkey,
@@ -2047,10 +2046,10 @@
                             ],
                             content: ''
                         };
-
+        
                         const signedDeleteEvent = await finalizeEvent(deleteEvent, sk);
                         let sentCount = 0;
-
+        
                         for (const relay of NOSTR_RELAYS) {
                             try {
                                 const ws = new WebSocket(relay);
@@ -2059,7 +2058,7 @@
                                         ws.close();
                                         resolve();
                                     }, 5000);
-
+        
                                     ws.onopen = () => {
                                         ws.send(JSON.stringify(['EVENT', signedDeleteEvent]));
                                         setTimeout(() => {
@@ -2068,7 +2067,7 @@
                                             ws.close();
                                         }, 1000);
                                     };
-
+        
                                     ws.onerror = () => {
                                         clearTimeout(timeout);
                                         resolve();
@@ -2079,20 +2078,20 @@
                                 // Silently continue
                             }
                         }
-
+        
                         return sentCount > 0;
                     } catch (e) {
                         return false;
                     }
                 }
-
+        
                 const blossomServers = BLOSSOM_SERVERS;
                 const authKeyToUse = uploadAuthKeyHex || (chunkAuthKeysHex && chunkAuthKeysHex.length > 0 ? chunkAuthKeysHex[0] : null);
                 const pubkeyToUse = uploadedPubkeyHex || null;
-
+        
                 let blossomDeleted = 0;
                 let blossomFailed = 0;
-
+        
                 // 1. Blossom 파일 삭제
                 if (authKeyToUse && chunkHashes.length > 0) {
                     for (let i = 0; i < chunkHashes.length; i++) {
@@ -2101,23 +2100,23 @@
                         if (chunkAuthKeysHex && chunkAuthKeysHex.length > i && chunkAuthKeysHex[i]) {
                             chunkAuthKey = chunkAuthKeysHex[i];
                         }
-
+        
                         let deletedFromAny = false;
-
+        
                         for (const server of blossomServers) {
                             try {
                                 const headResponse = await fetch(`${server}/${chunkHash}`, { method: 'HEAD' });
                                 if (headResponse.status === 404) continue;
-
+        
                                 const authEvent = await createBlossomAuthEvent(chunkAuthKey, chunkHash, pubkeyToUse);
                                 if (!authEvent) continue;
-
+        
                                 const authHeader = `Nostr ${btoa(JSON.stringify(authEvent))}`;
                                 const deleteResponse = await fetch(`${server}/${chunkHash}`, {
                                     method: 'DELETE',
                                     headers: { 'Authorization': authHeader }
                                 });
-
+        
                                 if (deleteResponse.ok || deleteResponse.status === 204) {
                                     deletedFromAny = true;
                                     break;
@@ -2126,7 +2125,7 @@
                                 // Silently continue
                             }
                         }
-
+        
                         if (deletedFromAny) {
                             blossomDeleted++;
                         } else {
@@ -2134,8 +2133,8 @@
                         }
                     }
                 }
-
-                // 2. 공유 URL Nostr 이벤트 삭제
+        
+                // 2. 공유 URL Nostr 이벤트 삭제 (분할된 경우 모든 파트 삭제)
                 let shareDeleted = false;
                 if (shareEventId && sharePrivateKey) {
                     showDecryptResult('Deleting share URL from Nostr...', false);
@@ -2164,24 +2163,49 @@
                     }
                     
                     if (shareKeyHex && shareKeyHex.length === 64) {
-                        shareDeleted = await sendDeleteEventToAllRelays(shareEventId, shareKeyHex);
+                        let shareEventIds = [];
+                        if (shareEventId.includes('|')) {
+                            shareEventIds = shareEventId.split('|');
+                        } else {
+                            shareEventIds = [shareEventId];
+                        }
+                        
+                        let allDeleted = true;
+                        for (const sid of shareEventIds) {
+                            const deleted = await sendDeleteEventToAllRelays(sid, shareKeyHex);
+                            if (!deleted) allDeleted = false;
+                        }
+                        shareDeleted = allDeleted;
                     }
                 }
-
-                // 3. delete URL Nostr 이벤트 삭제
+        
+                // 3. delete URL Nostr 이벤트 삭제 (분할된 경우 모든 파트 삭제)
                 let deleteUrlDeleted = false;
                 if (eventId && keyHex) {
                     showDecryptResult('Deleting delete URL from Nostr...', false);
-                    deleteUrlDeleted = await sendDeleteEventToAllRelays(eventId, keyHex);
+                    
+                    let deleteEventIds = [];
+                    if (eventId.includes('|')) {
+                        deleteEventIds = eventId.split('|');
+                    } else {
+                        deleteEventIds = [eventId];
+                    }
+                    
+                    let allDeleted = true;
+                    for (const did of deleteEventIds) {
+                        const deleted = await sendDeleteEventToAllRelays(did, keyHex);
+                        if (!deleted) allDeleted = false;
+                    }
+                    deleteUrlDeleted = allDeleted;
                 }
-
-                // 4. 현재 URL의 추가 이벤트들도 삭제
+        
+                // 4. 현재 URL의 추가 이벤트들도 삭제 (분할된 경우 처리)
                 try {
                     const currentUrlObj = new URL(window.location.href);
                     
                     const currentEncodedId = currentUrlObj.searchParams.get('id');
                     if (currentEncodedId) {
-                        const currentEventId = decodeFromBase64(currentEncodedId);
+                        let currentEventId = decodeFromBase64(currentEncodedId);
                         if (currentEventId && currentEventId !== shareEventId && currentEventId !== eventId) {
                             const currentKey = currentUrlObj.searchParams.get('k');
                             if (currentKey) {
@@ -2204,17 +2228,23 @@
                                     console.warn('Failed to decode current key:', e);
                                 }
                                 if (currentKeyHex && currentKeyHex.length === 64) {
-                                    await sendDeleteEventToAllRelays(currentEventId, currentKeyHex);
+                                    let currentEventIds = [];
+                                    if (currentEventId.includes('|')) {
+                                        currentEventIds = currentEventId.split('|');
+                                    } else {
+                                        currentEventIds = [currentEventId];
+                                    }
+                                    for (const cid of currentEventIds) {
+                                        await sendDeleteEventToAllRelays(cid, currentKeyHex);
+                                    }
                                 }
                             }
                         }
                     }
-                    
-                    
                 } catch (e) {
                     // Silently continue
                 }
-
+        
                 // 결과 표시
                 let resultMsg = '';
                 if (blossomDeleted > 0 && (shareDeleted || deleteUrlDeleted)) {
@@ -2232,7 +2262,7 @@
                     showDecryptResult(resultMsg, true);
                     alert(resultMsg);
                 }
-
+        
             } catch (err) {
                 const errorMsg = `Delete failed: ${err.message}`;
                 showDecryptResult(errorMsg, true);
@@ -3478,22 +3508,150 @@
             const deleteId = urlParams.get('delete');
             const deleteKey = urlParams.get('k');
             
+            //  삭제 URL 처리 (분할 이벤트 지원) 
             if (deleteId && deleteKey) {
-                const eventId = decodeFromBase64(deleteId);
+                // deleteId가 분할된 ID인지 확인 (| 구분자)
+                let eventId = decodeFromBase64(deleteId);
                 let privateKey = null;
                 const bytes = decodeFromBase64ToBytes(deleteKey);
                 if (bytes) {
                     privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
                 }
                 
+                // decodeFromBase64 실패 시 원본 사용
+                if (!eventId) {
+                    eventId = deleteId;
+                }
+                
+                // privateKey가 hex가 아니면 원본 사용
+                if (privateKey && privateKey.length !== 64) {
+                    privateKey = deleteKey;
+                }
+                
                 if (eventId && privateKey && privateKey.length === 64) {
                     showDecryptResult('Processing delete request...', false);
                     
                     setTimeout(async () => {
-                        //  delete URL은 handleDelete에서 직접 복호화하므로 null 전달 
-                        await handleDelete(eventId, privateKey, null, null, null, null, null);
-                        const cleanUrl = window.location.pathname + window.location.hash;
-                        window.history.replaceState({}, document.title, cleanUrl);
+                        try {
+                            //  분할된 이벤트 ID 처리 
+                            let eventIds = [];
+                            if (eventId.includes('|')) {
+                                eventIds = eventId.split('|');
+                            } else {
+                                eventIds = [eventId];
+                            }
+                            
+                            // 첫 번째 이벤트로 delete URL 복원
+                            const firstEventId = eventIds[0];
+                            const event = await fetchSingleEvent(firstEventId);
+                            
+                            if (!event) {
+                                showDecryptResult('❌ Delete URL event not found on relays.', true);
+                                alert('Error: Could not find the delete URL event on relays');
+                                const cleanUrl = window.location.pathname + window.location.hash;
+                                window.history.replaceState({}, document.title, cleanUrl);
+                                return;
+                            }
+                            
+                            // delete URL 복호화
+                            const nostrTools = await loadNostrTools();
+                            const { getPublicKey, nip44 } = nostrTools;
+                            const recipientPk = getPublicKey(privateKey);
+                            const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
+                            const decrypted = nip44.decrypt(event.content, conversationKey);
+                            const rumor = JSON.parse(decrypted);
+                            const deleteUrl = rumor.content;
+                            
+                            // deleteUrl에서 metadata 추출
+                            const urlObj = new URL(deleteUrl);
+                            const metadataEncoded = urlObj.searchParams.get('m');
+                            
+                            if (!metadataEncoded) {
+                                showDecryptResult('❌ No metadata found in delete URL.', true);
+                                alert('Error: No metadata found');
+                                const cleanUrl = window.location.pathname + window.location.hash;
+                                window.history.replaceState({}, document.title, cleanUrl);
+                                return;
+                            }
+                            
+                            // metadata 디코딩
+                            let metadataJson;
+                            try {
+                                let b64 = metadataEncoded.replace(/-/g, '+').replace(/_/g, '/');
+                                while (b64.length % 4) b64 += '=';
+                                const binary = atob(b64);
+                                const bytes = new Uint8Array(binary.length);
+                                for (let i = 0; i < binary.length; i++) {
+                                    bytes[i] = binary.charCodeAt(i);
+                                }
+                                metadataJson = new TextDecoder().decode(bytes);
+                            } catch (e) {
+                                showDecryptResult('❌ Failed to decode metadata.', true);
+                                alert('Error: Failed to decode metadata');
+                                const cleanUrl = window.location.pathname + window.location.hash;
+                                window.history.replaceState({}, document.title, cleanUrl);
+                                return;
+                            }
+                            
+                            const metadata = JSON.parse(metadataJson);
+                            const chunkHashes = metadata.chunkHashes || [];
+                            const uploadAuthKeyHex = metadata.uploadAuthKey ? 
+                                (Array.isArray(metadata.uploadAuthKey) ? 
+                                    Array.from(metadata.uploadAuthKey).map(b => b.toString(16).padStart(2, '0')).join('') : 
+                                    metadata.uploadAuthKey) : null;
+                            const chunkAuthKeysHex = metadata.chunkAuthKeys ? 
+                                metadata.chunkAuthKeys.map(key => {
+                                    if (Array.isArray(key)) {
+                                        return Array.from(key).map(b => b.toString(16).padStart(2, '0')).join('');
+                                    }
+                                    return key;
+                                }).filter(key => key !== null) : null;
+                            const uploadedPubkeyHex = metadata.uploadedPubkey || null;
+                            const shareEventId = metadata.shareEventId;
+                            const sharePrivateKey = metadata.sharePrivateKey;
+                            
+                            // 삭제 확인 메시지
+                            let message = 'Are you sure you want to delete this shared link?\n\n';
+                            if (chunkHashes.length > 0) {
+                                message += `${chunkHashes.length} file chunk(s) will be deleted from Blossom servers.\n`;
+                            }
+                            if (metadata.fileHash) {
+                                message += `File hash: ${metadata.fileHash.substring(0, 16)}...\n`;
+                            }
+                            if (shareEventId) {
+                                message += `\nShare URL event ID: ${shareEventId.substring(0, 16)}...\n`;
+                            }
+                            message += '\nThis action cannot be undone.';
+        
+                            if (!confirm(message)) {
+                                showDecryptResult('Delete cancelled.', true);
+                                const cleanUrl = window.location.pathname + window.location.hash;
+                                window.history.replaceState({}, document.title, cleanUrl);
+                                return;
+                            }
+                            
+                            //  handleDelete 호출 (분할된 ID 전달) 
+                            await handleDelete(
+                                eventId,  // 분할된 ID 그대로 전달
+                                privateKey,
+                                uploadAuthKeyHex,
+                                chunkAuthKeysHex,
+                                chunkHashes,
+                                metadata.fileHash,
+                                uploadedPubkeyHex
+                            );
+                            
+                            // URL 정리
+                            const cleanUrl = window.location.pathname + window.location.hash;
+                            window.history.replaceState({}, document.title, cleanUrl);
+                            
+                        } catch (err) {
+                            showDecryptResult(`❌ Delete failed: ${err.message}`, true);
+                            alert(`Error: ${err.message}`);
+                            console.error(err);
+                            const cleanUrl = window.location.pathname + window.location.hash;
+                            window.history.replaceState({}, document.title, cleanUrl);
+                        }
                     }, 500);
                 } else {
                     showDecryptResult('Invalid delete URL: Failed to decode event ID or private key', true);
@@ -3501,7 +3659,7 @@
                 return;
             }
             
-            // 복호화 처리
+            // 기존 복호화 처리 (변경 없음)
             if (k && encodedId) {
                 shareLinkInput.value = window.location.href;
                 setTimeout(async () => {
