@@ -2343,17 +2343,24 @@
         window.handleDelete = handleDelete;
         window.decodeFromBase64ToBytes = decodeFromBase64ToBytes;
         // ---------- 스트리밍 방식으로 파일 읽기----------
-        async function readFileStream(file, onProgress) {
+        async function processFileStream(file, onProgress) {
             const chunkSize = 10 * 1024 * 1024; // 10MB
             const totalSize = file.size;
             let offset = 0;
-            const chunks = [];
-        
+            const encryptedChunks = [];
+            const key = crypto.getRandomValues(new Uint8Array(32));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            
+            // 전체 파일을 읽으면서 바로 암호화
             while (offset < totalSize) {
                 const end = Math.min(offset + chunkSize, totalSize);
                 const chunk = file.slice(offset, end);
                 const buffer = await chunk.arrayBuffer();
-                chunks.push(new Uint8Array(buffer));
+                const chunkData = new Uint8Array(buffer);
+                
+                // 암호화 (청크 단위로)
+                const encryptedChunk = await encryptChunk(chunkData, key, iv);
+                encryptedChunks.push(encryptedChunk);
                 
                 offset = end;
                 
@@ -2362,16 +2369,34 @@
                     onProgress(progress, offset, totalSize);
                 }
             }
-        
-            // 모든 청크를 하나로 합치기
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            
+            // 모든 암호화된 청크를 하나로 합치기 (여전히 필요)
+            const totalLength = encryptedChunks.reduce((sum, chunk) => sum + chunk.length, 0);
             const result = new Uint8Array(totalLength);
             let pos = 0;
-            for (const chunk of chunks) {
+            for (const chunk of encryptedChunks) {
                 result.set(chunk, pos);
                 pos += chunk.length;
             }
-            return result;
+            
+            return {
+                ciphertext: result,
+                key,
+                iv
+            };
+        }
+        
+        // ---------- 청크 단위 암호화 ----------
+        async function encryptChunk(data, key, iv) {
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', key, { name: 'AES-GCM' }, false, ['encrypt']
+            );
+            const encrypted = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv },
+                cryptoKey,
+                data
+            );
+            return new Uint8Array(encrypted);
         }
         
         // ---------- 스트리밍 방식 암호화----------
@@ -2421,21 +2446,25 @@
                 setProgress(0, t('readingFile'));
                 currentFilename = file.name;
         
-                let fileData;
+                // ★★★ 파일을 읽으면서 바로 암호화 ★★★
+                let encryptionResult;
                 try {
-                    fileData = await readFileStream(file, (progress, loaded, total) => {
-                        const percent = (progress / 100) * 20; // 전체 진행률의 0-20%
-                        setProgress(percent, `Reading Files... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
+                    encryptionResult = await processFileStream(file, (progress, loaded, total) => {
+                        const percent = (progress / 100) * 30; // 전체 진행률의 0-30%
+                        setProgress(percent, `Reading & Encrypting... ${(loaded / 1024 / 1024).toFixed(1)}MB / ${(total / 1024 / 1024).toFixed(1)}MB`);
                     });
-                } catch (readErr) {
-                    throw new Error(`파일 읽기 실패: ${readErr.message}`);
+                } catch (err) {
+                    throw new Error(`파일 처리 실패: ${err.message}`);
                 }
         
-                // ★ 자동삭제가 켜져 있으면, 암호화 전에 삭제용 키를 미리 생성해서 메타데이터에 넣는다
+                const { ciphertext, key, iv } = encryptionResult;
+                setProgress(40, t('encryptDone'));
+        
+                // 자동삭제 키 생성
                 let pregenKeys = null;
                 let deleteKeysForMeta = null;
                 if (autoDeleteEnabled) {
-                    const totalChunksEstimate = Math.ceil(fileData.length / CHUNK_SIZE) || 1;
+                    const totalChunksEstimate = Math.ceil(ciphertext.length / CHUNK_SIZE) || 1;
                     pregenKeys = await pregenerateDeleteKeys(totalChunksEstimate);
                     deleteKeysForMeta = {
                         uploadAuthKey: Array.from(pregenKeys.uploadAuthKey),
@@ -2443,14 +2472,6 @@
                         chunkAuthKeys: pregenKeys.chunkAuthKeys.map(k => Array.from(k))
                     };
                 }
-        
-                setProgress(20, t('encrypting'));
-                const { ciphertext, key, iv } = await encryptFileWithNameStream(fileData, file, autoDeleteEnabled, deleteKeysForMeta);
-                
-                // 메모리 해제 (fileData는 더 이상 필요 없음)
-                fileData = null;
-                
-                setProgress(40, t('encryptDone'));
         
                 const totalChunks = Math.ceil(ciphertext.length / CHUNK_SIZE);
         
@@ -2474,7 +2495,7 @@
         
                 setProgress(90, t('uploadDoneLinking'));
         
-                // ★ 공유 URL에는 자동삭제 관련 정보를 절대 포함하지 않는다
+                // 공유 URL 생성
                 const fullShareLink = createShareLink(
                     uploadResult.hash,
                     key,
@@ -2485,7 +2506,7 @@
                 setProgress(95, t('shorteningNostr'));
         
                 // ============================================================
-                // ★★★ 항상 단일 URL로만 단축 (분할 로직 제거) ★★★
+                // Nostr 단축 로직
                 // ============================================================
                 const { generateSecretKey, getPublicKey } = await loadNostrTools();
                 const shareSenderSk = generateSecretKey();
@@ -2624,6 +2645,7 @@
                 setProgress(100, t('allDone'));
                 setTimeout(hideProgress, 1500);
         
+                // 결과 표시
                 let linkHtml = `
                     <div class="flex-between">
                         <span class="text-green">${t('uploadSuccess')}</span>
@@ -2672,7 +2694,7 @@
         
                 showResult(linkHtml);
         
-                // 이벤트 리스너 설정 (분할 URL 관련 핸들러 제거됨)
+                // 이벤트 리스너 설정 (기존과 동일)
                 if (!window._deleteEventsAttached) {
                     resultBox.addEventListener('click', async function(e) {
                         // Copy 버튼
@@ -2753,7 +2775,7 @@
                     window._deleteEventsAttached = true;
                 }
         
-                // 기존 버튼 이벤트 리스너들
+                // 버튼 이벤트 리스너들
                 document.getElementById('copyShortBtn')?.addEventListener('click', () => {
                     const input = document.getElementById('shortUrlInput');
                     if (input) {
