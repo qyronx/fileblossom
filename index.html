@@ -1046,22 +1046,45 @@
         }
         // ---------- 복호화 (파일명 복원) ----------
         async function decryptFileWithName(ciphertext, key, iv) {
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
-            );
-            const decrypted = await crypto.subtle.decrypt(
-                { name: 'AES-GCM', iv },
-                cryptoKey,
-                ciphertext
-            );
+            let decrypted;
+            try {
+                const cryptoKey = await crypto.subtle.importKey(
+                    'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
+                );
+                decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv },
+                    cryptoKey,
+                    ciphertext
+                );
+            } catch (e) {
+                // 키/IV가 틀렸거나 데이터가 손상된 경우 (GCM 인증 실패)
+                throw new Error('복호화 실패: 키 또는 IV가 올바르지 않거나 데이터가 손상되었습니다.');
+            }
+        
             const combined = new Uint8Array(decrypted);
-
-            //  DataView로 명시적 리틀엔디안 4바이트 길이 읽기
+        
+            if (combined.length < 4) {
+                throw new Error('복호화된 데이터가 너무 짧습니다 (메타데이터 헤더 없음)');
+            }
+        
             const metadataLength = new DataView(combined.buffer, combined.byteOffset, 4).getUint32(0, true);
+        
+            if (metadataLength <= 0 || metadataLength > combined.length - 4) {
+                throw new Error(`메타데이터 길이가 유효하지 않습니다 (length: ${metadataLength})`);
+            }
+        
             const metadataBytes = combined.slice(4, 4 + metadataLength);
-            const metadata = JSON.parse(new TextDecoder().decode(metadataBytes));
+        
+            let metadata;
+            try {
+                const metadataText = new TextDecoder().decode(metadataBytes);
+                metadata = JSON.parse(metadataText);
+            } catch (e) {
+                throw new Error('메타데이터 JSON 파싱 실패: 키/IV 불일치로 데이터가 깨졌을 수 있습니다.');
+            }
+        
             const fileData = combined.slice(4 + metadataLength);
-
+        
             return {
                 filename: metadata.filename,
                 data: fileData,
@@ -1459,17 +1482,36 @@
 
         function parseShareLink(url) {
             try {
-                const hash = url.split('#')[1];
-                if (!hash) return null;
-                const parts = hash.split(',');
+                const hashPart = url.split('#')[1];
+                if (!hashPart) return null;
+        
+                // 프래그먼트가 URL 인코딩되어 넘어온 경우를 대비해 디코딩 시도
+                let decodedHash = hashPart;
+                try {
+                    decodedHash = decodeURIComponent(hashPart);
+                } catch {
+                    // 디코딩 실패 시 원본 사용 (이미 순수 hex/base64라 문제 없는 경우)
+                }
+        
+                const parts = decodedHash.split(',');
                 if (parts.length < 4) return null;
+        
+                const key = hexToUint8(parts[1]);
+                const iv = hexToUint8(parts[2]);
+        
+                if (!key || !iv || key.length !== 32 || iv.length !== 12) {
+                    console.warn('Invalid key/iv length after decode:', key?.length, iv?.length);
+                    return null;
+                }
+        
                 return {
                     hash: parts[0],
-                    key: hexToUint8(parts[1]),
-                    iv: hexToUint8(parts[2]),
+                    key,
+                    iv,
                     chunkHashes: parts.slice(3)
                 };
-            } catch {
+            } catch (e) {
+                console.error('parseShareLink error:', e);
                 return null;
             }
         }
@@ -3101,7 +3143,7 @@
                 const urlObj = new URL(rawUrl);
                 const encodedId = urlObj.searchParams.get('id');
                 const encodedKey = urlObj.searchParams.get('k');
-                
+        
                 if (!encodedId || !encodedKey) {
                     showDecryptResult(t('noEventIdInUrl'), true);
                     return;
@@ -3109,19 +3151,15 @@
         
                 let eventId = decodeFromBase64(encodedId);
                 let senderKeyHex = decodeFromBase64(encodedKey);
-                
-                if (!eventId) {
-                    eventId = encodedId;
-                }
-                if (!senderKeyHex) {
-                    senderKeyHex = encodedKey;
-                }
-                
+        
+                if (!eventId) eventId = encodedId;
+                if (!senderKeyHex) senderKeyHex = encodedKey;
+        
                 if (!/^[0-9a-fA-F]{64}$/.test(eventId) && !eventId.includes('|')) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-                
+        
                 if (!senderKeyHex || senderKeyHex.length !== 64) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
@@ -3137,33 +3175,40 @@
                 try {
                     const { nip44, getPublicKey } = await loadNostrTools();
                     const recipientPk = getPublicKey(senderKeyHex);
-                    
+        
                     let originalUrl = '';
-                    
-                    // 분할된 이벤트인 경우
+        
                     if (event.id && event.id.includes('|')) {
-                        // 분할된 URL 복원
                         const partIds = event.id.split('|');
                         let fullData = '';
-                        
+        
                         for (const partId of partIds) {
                             const partEvent = await fetchSingleEvent(partId);
                             if (!partEvent) {
                                 throw new Error(`Part ${partId} not found`);
                             }
-                            
+        
                             const conversationKey = nip44.getConversationKey(recipientPk, partEvent.pubkey);
-                            const decrypted = nip44.decrypt(partEvent.content, conversationKey);
+                            let decrypted;
+                            try {
+                                decrypted = nip44.decrypt(partEvent.content, conversationKey);
+                            } catch (e) {
+                                throw new Error(`분할 이벤트 복호화 실패 (${partId.slice(0,8)}): ${e.message}`);
+                            }
                             const rumor = JSON.parse(decrypted);
                             const partData = JSON.parse(rumor.content);
                             fullData += partData.data;
                         }
-                        
+        
                         originalUrl = fullData;
                     } else {
-                        // 일반 이벤트
                         const conversationKey = nip44.getConversationKey(recipientPk, event.pubkey);
-                        const decrypted = nip44.decrypt(event.content, conversationKey);
+                        let decrypted;
+                        try {
+                            decrypted = nip44.decrypt(event.content, conversationKey);
+                        } catch (e) {
+                            throw new Error(`nip44 복호화 실패: 발신자 키가 이 이벤트와 맞지 않거나 데이터가 손상됨 (${e.message})`);
+                        }
                         const rumor = JSON.parse(decrypted);
                         originalUrl = rumor.content;
                     }
@@ -3176,12 +3221,13 @@
                     }
                 } catch (err) {
                     showDecryptResult(t('decryptFail', { err: err.message }), true);
-                    console.error(err);
+                    console.error('handleNostrDecrypt error:', err);
                 }
             } catch (err) {
                 showDecryptResult(t('errorGeneric', { err: err.message }), true);
-                console.error(err);
+                console.error('handleNostrDecrypt outer error:', err);
             }
+        }
         }
         // ---------- URL을 직접 받아서 복호화 실행 (표시 없이) ----------
         async function handleDecryptWithUrl(url, fromNostr = false) {
