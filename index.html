@@ -1659,7 +1659,34 @@
                 return null;
             }
         }
-
+        function packUrlParams(eventIdHex, keyHexOrBytes, type = 0) {
+            const idBytes = hexToUint8(eventIdHex);
+            const keyBytes = (keyHexOrBytes instanceof Uint8Array)
+                ? keyHexOrBytes
+                : hexToUint8(keyHexOrBytes);
+        
+            const packed = new Uint8Array(1 + idBytes.length + keyBytes.length);
+            packed[0] = type; // 0 = share, 1 = delete (구분용)
+            packed.set(idBytes, 1);
+            packed.set(keyBytes, 1 + idBytes.length);
+        
+            return encodeToBase64(packed);
+        }
+        
+        function unpackUrlParams(packedBase64) {
+            const bytes = decodeFromBase64ToBytes(packedBase64);
+            if (!bytes || bytes.length < 65) return null;
+        
+            const type = bytes[0];
+            const idBytes = bytes.slice(1, 33);
+            const keyBytes = bytes.slice(33, 65);
+        
+            return {
+                type,
+                eventIdHex: uint8ToHex(idBytes),
+                keyHex: uint8ToHex(keyBytes)
+            };
+        }
         // ---------- Base64 인코딩/디코딩 ----------
         function decodeFromBase64ToUtf8(base64) {
             let b64 = base64.replace(/-/g, '+').replace(/_/g, '/');
@@ -2761,15 +2788,16 @@
                         const deleteEncodedKey = encodeToBase64(deleteSenderSk);
 
                         if (shareEncodedId && shareEncodedKey && deleteEncodedId && deleteEncodedKey) {
+                            const packedShare = packUrlParams(shareResult.eventId, shareSenderSk, 0);
+                            const packedDelete = packUrlParams(deleteResult.eventId, deleteSenderSk, 1);
+                            
                             const shortUrl = new URL(window.location.href);
                             shortUrl.search = '';
-                            shortUrl.searchParams.set('id', shareEncodedId);
-                            shortUrl.searchParams.set('k', shareEncodedKey);
-
+                            shortUrl.searchParams.set('u', packedShare);
+                            
                             const deleteUrl = new URL(window.location.href);
                             deleteUrl.search = '';
-                            deleteUrl.searchParams.set('delete', deleteEncodedId);
-                            deleteUrl.searchParams.set('k', deleteEncodedKey);
+                            deleteUrl.searchParams.set('u', packedDelete);
 
                             if (uploadResult.uploadAuthKey) {
                                 uploadAuthKeyEncoded = encodeToBase64(uploadResult.uploadAuthKey);
@@ -2933,18 +2961,12 @@
 
                                 try {
                                     const urlObj = new URL(deleteUrl);
-                                    const encodedId = urlObj.searchParams.get('delete');
-                                    const encodedKey = urlObj.searchParams.get('k');
+                                    const packed = urlObj.searchParams.get('u');
 
-                                    if (encodedId && encodedKey) {
-                                        const eventId = decodeFromBase64(encodedId);
-                                        let privateKey = null;
-                                        const bytes = decodeFromBase64ToBytes(encodedKey);
-                                        if (bytes) {
-                                            privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-                                        }
+                                    if (packed) {
+                                        const parsed = unpackUrlParams(packed);
 
-                                        if (eventId && privateKey && privateKey.length === 64) {
+                                        if (parsed && parsed.eventIdHex && parsed.keyHex && parsed.keyHex.length === 64) {
                                             let uploadAuthKey = null;
                                             let chunkAuthKeys = null;
                                             let allChunkHashes = null;
@@ -2959,7 +2981,7 @@
                                                 uploadedPubkey = shortUrls[0].uploadedPubkey || null;
                                             }
 
-                                            await handleDelete(eventId, privateKey, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey);
+                                            await handleDelete(parsed.eventIdHex, parsed.keyHex, uploadAuthKey, chunkAuthKeys, allChunkHashes, fileHash, uploadedPubkey);
                                         } else {
                                             alert('Error: Failed to decode event ID or private key');
                                         }
@@ -3195,47 +3217,40 @@
                 showDecryptResult(t('enterUrlToDecrypt'), true);
                 return;
             }
-
             try {
                 const urlObj = new URL(rawUrl);
-                const encodedId = urlObj.searchParams.get('id');
-                const encodedKey = urlObj.searchParams.get('k');
-                
-                if (!encodedId || !encodedKey) {
+                const packed = urlObj.searchParams.get('u');
+        
+                if (!packed) {
                     showDecryptResult(t('noEventIdInUrl'), true);
                     return;
                 }
-
-                // Base64 디코딩
-                let eventId = decodeFromBase64(encodedId);
-                let senderKeyHex = decodeFromBase64(encodedKey);
-                
-                // 디코딩 실패 시 원본 Base64 사용 시도
-                if (!eventId) {
-                    eventId = encodedId;
+        
+                const parsed = unpackUrlParams(packed);
+                if (!parsed) {
+                    showDecryptResult(t('keyDecodeFail'), true);
+                    return;
                 }
-                if (!senderKeyHex) {
-                    senderKeyHex = encodedKey;
-                }
-                
+        
+                const eventId = parsed.eventIdHex;
+                const senderKeyHex = parsed.keyHex;
+        
                 // eventId가 hex 형식인지 확인
                 if (!/^[0-9a-fA-F]{64}$/.test(eventId)) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-                
+        
                 if (!senderKeyHex || senderKeyHex.length !== 64) {
                     showDecryptResult(t('keyDecodeFail'), true);
                     return;
                 }
-
+        
                 showDecryptResult(t('lookingUpEvent', { id: eventId.slice(0, 8) }), false);
-
                 try {
                     // ★ resolveGiftWrapChain: 링크가 여러 조각(체이닝)으로 분할 발행되었어도
                     // 첫 event만으로 자동으로 이어붙여 원본 URL을 복원한다. 분할되지 않은 경우도 동일하게 동작.
                     const originalUrl = await resolveGiftWrapChain(eventId, senderKeyHex);
-
                     if (originalUrl && originalUrl.includes('#')) {
                         showDecryptResult(t('decryptSuccessRedirect'), false);
                         await handleDecryptWithUrl(originalUrl, true);
@@ -3456,7 +3471,7 @@
         async function handleDecrypt() {
             if (isProcessing) return;
             isProcessing = true;
-
+        
             try {
                 const rawUrl = shareLinkInput.value.trim();
                 if (!rawUrl) {
@@ -3464,34 +3479,33 @@
                     isProcessing = false;
                     return;
                 }
-
+        
                 const urlObj = new URL(rawUrl);
-                const encodedId = urlObj.searchParams.get('id');
-                const encodedKey = urlObj.searchParams.get('k');
-                
-                if (encodedId || encodedKey) {
+                const packed = urlObj.searchParams.get('u');
+        
+                if (packed) {
                     await handleNostrDecrypt();
                     isProcessing = false;
                     return;
                 }
-
+        
                 // 일반 URL 처리 (기존과 동일)
                 if (!rawUrl.includes('#')) {
                     showDecryptResult(t('invalidShareLink'), true);
                     isProcessing = false;
                     return;
                 }
-
+        
                 const parsed = parseShareLink(rawUrl);
                 if (!parsed) {
                     showDecryptResult(t('invalidShareLink'), true);
                     isProcessing = false;
                     return;
                 }
-
+        
                 try {
                     showDecryptResult(t('downloadingChunks'), false);
-
+        
                     let result;
                     if (parsed.legacy) {
                         // 구버전 공유 링크 하위호환
@@ -3514,7 +3528,7 @@
                             throw new Error('전체 파일 해시 불일치');
                         }
                     }
-
+        
                     const totalBytes = result.parts.reduce((sum, p) => sum + p.length, 0);
                     const fileSizeMB = totalBytes / (1024 * 1024);
                     if (fileSizeMB > 10) {
@@ -3580,7 +3594,7 @@
                     a.click();
                     document.body.removeChild(a);
                     setTimeout(() => URL.revokeObjectURL(url), 5000);
-
+        
                     showDecryptResult(t('downloadCompleteNamed', { 
                         name: result.filename, 
                         size: (totalBytes / 1024).toFixed(1) 
@@ -3616,47 +3630,40 @@
 
         window.addEventListener('load', () => {
             const urlParams = new URLSearchParams(window.location.search);
-            const encodedId = urlParams.get('id');
-            const k = urlParams.get('k');
-            const deleteId = urlParams.get('delete');
-            const deleteKey = urlParams.get('k');
-            
-            if (deleteId && deleteKey) {
-                const eventId = decodeFromBase64(deleteId);
-                let privateKey = null;
-                const bytes = decodeFromBase64ToBytes(deleteKey);
-                if (bytes) {
-                    privateKey = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        
+            // 압축 포맷: u=<base64(1바이트 타입 + 32바이트 eventId + 32바이트 key)>
+            const packed = urlParams.get('u');
+        
+            if (packed) {
+                const parsed = unpackUrlParams(packed);
+        
+                if (!parsed) {
+                    showDecryptResult('Invalid link: failed to decode parameters', true);
+                    return;
                 }
-                
-                if (eventId && privateKey && privateKey.length === 64) {
+        
+                if (parsed.type === 1) {
+                    // 삭제 링크
                     showDecryptResult('Processing delete request...', false);
-                    
+        
                     setTimeout(async () => {
-                        // ★★★ delete URL은 handleDelete에서 직접 복호화하므로 null 전달 ★★★
-                        await handleDelete(eventId, privateKey, null, null, null, null, null);
+                        // ★ delete URL은 handleDelete에서 직접 복호화하므로 나머지는 null 전달
+                        await handleDelete(parsed.eventIdHex, parsed.keyHex, null, null, null, null, null);
                         const cleanUrl = window.location.pathname + window.location.hash;
                         window.history.replaceState({}, document.title, cleanUrl);
                     }, 500);
                 } else {
-                    showDecryptResult('Invalid delete URL: Failed to decode event ID or private key', true);
+                    // 공유 링크
+                    shareLinkInput.value = window.location.href;
+                    setTimeout(async () => {
+                        await handleNostrDecrypt();
+                    }, 500);
                 }
                 return;
             }
-            
-            // 기존 복호화 처리
-            if (k && encodedId) {
-                shareLinkInput.value = window.location.href;
-                setTimeout(async () => {
-                    await handleNostrDecrypt();
-                }, 500);
-                return;
-            }
-            
-            if (encodedId) {
-                shareLinkInput.value = window.location.href;
-                showDecryptResult(`Nostr event ID included. Click "Decrypt" button.`, false);
-            } else if (window.location.hash) {
+        
+            // u 파라미터가 없고 해시(#)만 있는 경우 (기존 방식의 직접 공유 링크, id/k 체계는 완전히 제거)
+            if (window.location.hash) {
                 shareLinkInput.value = window.location.href;
                 setTimeout(async () => {
                     await handleDecrypt();
