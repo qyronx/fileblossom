@@ -2,11 +2,6 @@
 
 A simple file upload and management service built on the Blossom protocol.
 
-## Alternative Site
-
-This repository is an alternative site for https://devareta2.onrender.com/.
-
-If the original site becomes unavailable or inaccessible, this repository can be used as an alternative.
 
 ## Features
 
