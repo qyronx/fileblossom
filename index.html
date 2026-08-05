@@ -227,6 +227,13 @@
         }
         .multi-upload-btn:hover { background: #2ea043; }
         .multi-upload-btn.visible { display: block; }
+        .multi-upload-btn:disabled {
+            background: #21262d;
+            color: #6e7681;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+        .multi-upload-btn:disabled:hover { background: #21262d; }
 
         .file-list-preview {
             margin-top: 12px;
@@ -262,6 +269,13 @@
         }
         .file-list-preview .file-item .remove-btn:hover {
             color: #f85149;
+        }
+        .file-list-preview .file-item .remove-btn:disabled {
+            color: #30363d;
+            cursor: not-allowed;
+        }
+        .file-list-preview .file-item .remove-btn:disabled:hover {
+            color: #30363d;
         }
 
         .progress-wrap {
@@ -716,6 +730,7 @@
             'https://cdn.hzrd149.com'
         ];
         const CHUNK_SIZE = 10 * 1024 * 1024;
+        const DOWNLOAD_BATCH_BYTES = 300 * 1024 * 1024;
         // ★ 공유 URL이 이 바이트 수를 넘으면 분할하여 여러 Gift-wrap으로 전송한다
         const MAX_URL_BYTES = 50000;
         const PNG_STUB = new Uint8Array([
@@ -750,6 +765,7 @@
                 removeBtnTitle: '제거',
                 compressAndUpload: '압축하여 업로드',
                 uploading: '업로드 중...',
+                compressing: '압축 중...',
                 preparing: '준비 중...',
                 chunkInfoText: '청크: {current} / {total}',
                 decryptTitle: '파일 복호화',
@@ -845,6 +861,7 @@
                 removeBtnTitle: 'Remove',
                 compressAndUpload: 'Zip and upload',
                 uploading: 'Uploading...',
+                compressing: 'Compressing...',
                 preparing: 'Preparing...',
                 chunkInfoText: 'Chunks: {current} / {total}',
                 decryptTitle: 'Decrypt a file',
@@ -979,6 +996,7 @@
 
         window.addEventListener('DOMContentLoaded', () => {
             setLang(currentLang);
+            cleanupStaleOPFSTemp();
         });
         
         // ---------- 유틸리티 ----------
@@ -1111,21 +1129,20 @@
             };
         }
 
-        // ---------- 스트리밍 복호화 (청크를 하나씩 받아 즉시 복호화, Blob으로 조립) ----------
-        // onNeedChunk(index) -> Uint8Array(암호화된 청크 원본, PNG 스터빙 제거된 상태)를 반환해야 함
-        // 반환된 평문 청크들은 Blob 파츠로 누적되어 최종적으로 하나의 Blob으로 조립된다 (다운로드용, 메모리에 전체를 복사하지 않음)
-        async function decryptFileStreaming(totalChunks, key, chunkIVs, onNeedChunk, onProgress) {
+        async function decryptFileStreaming(totalChunks, key, chunkIVs, onNeedChunk, onProgress, onPlainChunk = null, concurrency = 4, onMetadata = null) {
             const cryptoKey = await crypto.subtle.importKey(
                 'raw', key, { name: 'AES-GCM' }, false, ['decrypt']
             );
 
             let filename = null, fileType = '', fileSize = 0, autoDelete = false, deleteKeys = null;
-            const plainParts = []; // Blob 조립용 (ArrayBuffer/Uint8Array 조각들) — 순차적으로만 쌓이고 합쳐서 복사하지 않음
+            const plainParts = onPlainChunk ? null : [];
             let metadataParsed = false;
-            let carry = new Uint8Array(0); // 메타데이터 길이/본문이 청크 경계를 넘는 경우를 대비한 잔여 버퍼
+            let carry = new Uint8Array(0);
+
+            const prefetcher = createPrefetcher(totalChunks, onNeedChunk, Math.max(1, concurrency));
 
             for (let i = 0; i < totalChunks; i++) {
-                const encryptedChunk = await onNeedChunk(i);
+                const encryptedChunk = await prefetcher.get(i);
                 const iv = hexToUint8(chunkIVs[i]);
                 const decrypted = await crypto.subtle.decrypt(
                     { name: 'AES-GCM', iv },
@@ -1155,10 +1172,17 @@
                     metadataParsed = true;
                     carry = new Uint8Array(0);
                     plainChunk = combined.slice(4 + metadataLength);
+                    if (onMetadata) {
+                        await onMetadata({ filename, type: fileType, size: fileSize, autoDelete, deleteKeys });
+                    }
                 }
 
                 if (plainChunk.length > 0) {
-                    plainParts.push(plainChunk);
+                    if (onPlainChunk) {
+                        await onPlainChunk(plainChunk);
+                    } else {
+                        plainParts.push(plainChunk);
+                    }
                 }
 
                 if (onProgress) {
@@ -1172,7 +1196,7 @@
                 size: fileSize,
                 autoDelete,
                 deleteKeys,
-                parts: plainParts // 호출부에서 new Blob(parts)로 조립 (전체를 하나의 배열로 복사하지 않음)
+                parts: plainParts
             };
         }
 
@@ -1181,6 +1205,370 @@
             out.set(a, 0);
             out.set(b, a.length);
             return out;
+        }
+
+        function createPrefetcher(totalItems, fetchFn, concurrency) {
+            const cache = new Map();
+            const waiters = new Map();
+            let nextToFetch = 0;
+            let active = 0;
+
+            function launchNext() {
+                while (active < concurrency && nextToFetch < totalItems) {
+                    const idx = nextToFetch++;
+                    active++;
+                    fetchFn(idx).then(value => {
+                        active--;
+                        const waiter = waiters.get(idx);
+                        if (waiter) {
+                            waiters.delete(idx);
+                            waiter.resolve(value);
+                        } else {
+                            cache.set(idx, { ok: true, value });
+                        }
+                        launchNext();
+                    }).catch(err => {
+                        active--;
+                        const waiter = waiters.get(idx);
+                        if (waiter) {
+                            waiters.delete(idx);
+                            waiter.reject(err);
+                        } else {
+                            cache.set(idx, { ok: false, err });
+                        }
+                        launchNext();
+                    });
+                }
+            }
+            launchNext();
+
+            return {
+                get(idx) {
+                    if (cache.has(idx)) {
+                        const entry = cache.get(idx);
+                        cache.delete(idx);
+                        return entry.ok ? Promise.resolve(entry.value) : Promise.reject(entry.err);
+                    }
+                    return new Promise((resolve, reject) => waiters.set(idx, { resolve, reject }));
+                }
+            };
+        }
+
+        function triggerBlobDownload(blob, name) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        function supportsOPFS() {
+            return !!(navigator.storage && navigator.storage.getDirectory);
+        }
+
+        async function createOPFSSink() {
+            const root = await navigator.storage.getDirectory();
+            const name = 'fb_tmp_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+            const fileHandle = await root.getFileHandle(name, { create: true });
+            const writable = await fileHandle.createWritable();
+            return {
+                fileHandle,
+                async write(chunk) { await writable.write(chunk); },
+                async close() { await writable.close(); },
+                async abort() { try { await writable.abort(); } catch {} },
+                async cleanup() {
+                    try { await root.removeEntry(name); } catch {}
+                }
+            };
+        }
+
+        async function cleanupStaleOPFSTemp() {
+            if (!supportsOPFS()) return;
+            try {
+                const root = await navigator.storage.getDirectory();
+                const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+                for await (const name of root.keys()) {
+                    if (!name.startsWith('fb_tmp_')) continue;
+                    const ts = parseInt(name.split('_')[2], 10);
+                    if (!isNaN(ts) && ts < cutoff) {
+                        try { await root.removeEntry(name); } catch {}
+                    }
+                }
+            } catch {}
+        }
+
+        async function downloadFromOPFSHandle(fileHandle, filename) {
+            const file = await fileHandle.getFile();
+            triggerBlobDownload(file, filename);
+            return true;
+        }
+
+        function renderReadyDownloadButton(container, filename, sizeBytes, onDownload) {
+            container.innerHTML = `
+                <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #238636;">
+                    <span class="text-green">${t('downloadCompleteNamed', { name: filename, size: ((sizeBytes || 0) / 1024).toFixed(1) })}</span>
+                    <div style="margin-top:8px;">
+                        <button class="btn" id="opfsDownloadBtn">${t('download')}</button>
+                    </div>
+                </div>
+            `;
+            document.getElementById('opfsDownloadBtn')?.addEventListener('click', async (e) => {
+                const btn = e.target;
+                const originalText = btn.textContent;
+                btn.disabled = true;
+                btn.textContent = t('preparing');
+                try {
+                    const saved = await onDownload();
+                    if (saved) {
+                        btn.textContent = t('downloadComplete');
+                    } else {
+                        btn.disabled = false;
+                        btn.textContent = originalText;
+                    }
+                } catch (err) {
+                    btn.disabled = false;
+                    btn.textContent = originalText;
+                    showDecryptResult(t('decryptFail', { err: err.message }), true);
+                }
+            });
+        }
+
+        function createBatchedDownloader(batchBytes) {
+            let filename = 'file';
+            let multiPart = false;
+            let totalParts = 1;
+            let batchParts = [];
+            let batchLen = 0;
+            let partIndex = 0;
+
+            return {
+                onMetadata(meta) {
+                    filename = meta.filename || 'file';
+                    multiPart = meta.size > batchBytes;
+                    totalParts = multiPart ? Math.ceil(meta.size / batchBytes) : 1;
+                },
+                async onPlainChunk(chunk) {
+                    batchParts.push(chunk);
+                    batchLen += chunk.length;
+                    if (multiPart && batchLen >= batchBytes) {
+                        partIndex++;
+                        const blob = new Blob(batchParts);
+                        batchParts = [];
+                        batchLen = 0;
+                        const partName = `${filename}.part${String(partIndex).padStart(3, '0')}of${String(totalParts).padStart(3, '0')}`;
+                        triggerBlobDownload(blob, partName);
+                        await new Promise(resolve => setTimeout(resolve, 400));
+                    }
+                },
+                async finish() {
+                    if (batchParts.length > 0 || partIndex === 0) {
+                        partIndex++;
+                        const blob = new Blob(batchParts);
+                        batchParts = [];
+                        batchLen = 0;
+                        const name = multiPart
+                            ? `${filename}.part${String(partIndex).padStart(3, '0')}of${String(totalParts).padStart(3, '0')}`
+                            : filename;
+                        triggerBlobDownload(blob, name);
+                    }
+                    return { multiPart, totalParts: partIndex, filename };
+                }
+            };
+        }
+
+        let _crc32Table = null;
+        function getCrc32Table() {
+            if (_crc32Table) return _crc32Table;
+            const table = new Uint32Array(256);
+            for (let n = 0; n < 256; n++) {
+                let c = n;
+                for (let k = 0; k < 8; k++) {
+                    c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+                }
+                table[n] = c >>> 0;
+            }
+            _crc32Table = table;
+            return table;
+        }
+
+        function writeUint16LE(arr, offset, value) {
+            arr[offset] = value & 0xFF;
+            arr[offset + 1] = (value >>> 8) & 0xFF;
+        }
+
+        function writeUint32LE(arr, offset, value) {
+            arr[offset] = value & 0xFF;
+            arr[offset + 1] = (value >>> 8) & 0xFF;
+            arr[offset + 2] = (value >>> 16) & 0xFF;
+            arr[offset + 3] = (value >>> 24) & 0xFF;
+        }
+
+        function toDosDateTime(date) {
+            const time = ((date.getHours() & 0x1F) << 11) | ((date.getMinutes() & 0x3F) << 5) | ((date.getSeconds() >> 1) & 0x1F);
+            const dosDate = (((date.getFullYear() - 1980) & 0x7F) << 9) | (((date.getMonth() + 1) & 0xF) << 5) | (date.getDate() & 0x1F);
+            return { time, dosDate };
+        }
+
+        function yieldToMain() {
+            return new Promise(resolve => setTimeout(resolve, 0));
+        }
+
+        const CRC_YIELD_SLICE = 256 * 1024;
+
+        async function crc32Slice(table, crc, buf) {
+            for (let start = 0; start < buf.length; start += CRC_YIELD_SLICE) {
+                const end = Math.min(start + CRC_YIELD_SLICE, buf.length);
+                for (let i = start; i < end; i++) {
+                    crc = table[(crc ^ buf[i]) & 0xFF] ^ (crc >>> 8);
+                }
+                if (end < buf.length) await yieldToMain();
+            }
+            return crc;
+        }
+
+        async function compressFileEntry(file, onProgress) {
+            const table = getCrc32Table();
+            let crc = 0xFFFFFFFF;
+            const supportsCompression = typeof CompressionStream === 'function' && typeof file.stream === 'function';
+
+            if (!supportsCompression) {
+                const readChunk = 4 * 1024 * 1024;
+                let offset = 0;
+                while (offset < file.size) {
+                    const end = Math.min(offset + readChunk, file.size);
+                    const buf = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+                    crc = await crc32Slice(table, crc, buf);
+                    offset = end;
+                    if (onProgress) onProgress(offset, file.size);
+                }
+                return {
+                    blob: file,
+                    method: 0,
+                    crc32: (crc ^ 0xFFFFFFFF) >>> 0,
+                    compressedSize: file.size,
+                    uncompressedSize: file.size
+                };
+            }
+
+            let rawBytesSeen = 0;
+            const crcPass = new TransformStream({
+                async transform(chunk, controller) {
+                    crc = await crc32Slice(table, crc, chunk);
+                    rawBytesSeen += chunk.length;
+                    if (onProgress) onProgress(rawBytesSeen, file.size);
+                    controller.enqueue(chunk);
+                }
+            });
+
+            const compressedStream = file.stream().pipeThrough(crcPass).pipeThrough(new CompressionStream('deflate-raw'));
+            const reader = compressedStream.getReader();
+            const parts = [];
+            let compressedSize = 0;
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                parts.push(value);
+                compressedSize += value.length;
+            }
+            if (onProgress) onProgress(file.size, file.size);
+
+            return {
+                blob: new Blob(parts),
+                method: 8,
+                crc32: (crc ^ 0xFFFFFFFF) >>> 0,
+                compressedSize,
+                uncompressedSize: file.size
+            };
+        }
+
+        async function buildStreamingZip(entries, onEntryProgress) {
+            const parts = [];
+            const centralRecords = [];
+            let offset = 0;
+            const encoder = new TextEncoder();
+            const now = new Date();
+            const { time, dosDate } = toDosDateTime(now);
+
+            for (let idx = 0; idx < entries.length; idx++) {
+                const { name, file } = entries[idx];
+                const nameBytes = encoder.encode(name);
+                const compressed = await compressFileEntry(file, (done, total) => {
+                    if (onEntryProgress) onEntryProgress(idx, entries.length, done, total);
+                });
+
+                if (compressed.compressedSize >= 0xFFFFFFFF || compressed.uncompressedSize >= 0xFFFFFFFF || offset >= 0xFFFFFFFF) {
+                    throw new Error('4GB 이상은 지원하지 않습니다 (ZIP64 미지원)');
+                }
+
+                const header = new Uint8Array(30 + nameBytes.length);
+                writeUint32LE(header, 0, 0x04034b50);
+                writeUint16LE(header, 4, 20);
+                writeUint16LE(header, 6, 0x0800);
+                writeUint16LE(header, 8, compressed.method);
+                writeUint16LE(header, 10, time);
+                writeUint16LE(header, 12, dosDate);
+                writeUint32LE(header, 14, compressed.crc32);
+                writeUint32LE(header, 18, compressed.compressedSize);
+                writeUint32LE(header, 22, compressed.uncompressedSize);
+                writeUint16LE(header, 26, nameBytes.length);
+                writeUint16LE(header, 28, 0);
+                header.set(nameBytes, 30);
+
+                centralRecords.push({
+                    nameBytes,
+                    method: compressed.method,
+                    crc32: compressed.crc32,
+                    compressedSize: compressed.compressedSize,
+                    uncompressedSize: compressed.uncompressedSize,
+                    offset
+                });
+
+                parts.push(header);
+                parts.push(compressed.blob);
+                offset += header.length + compressed.compressedSize;
+            }
+
+            const centralDirStart = offset;
+            for (const rec of centralRecords) {
+                const ch = new Uint8Array(46 + rec.nameBytes.length);
+                writeUint32LE(ch, 0, 0x02014b50);
+                writeUint16LE(ch, 4, 20);
+                writeUint16LE(ch, 6, 20);
+                writeUint16LE(ch, 8, 0x0800);
+                writeUint16LE(ch, 10, rec.method);
+                writeUint16LE(ch, 12, time);
+                writeUint16LE(ch, 14, dosDate);
+                writeUint32LE(ch, 16, rec.crc32);
+                writeUint32LE(ch, 20, rec.compressedSize);
+                writeUint32LE(ch, 24, rec.uncompressedSize);
+                writeUint16LE(ch, 28, rec.nameBytes.length);
+                writeUint16LE(ch, 30, 0);
+                writeUint16LE(ch, 32, 0);
+                writeUint16LE(ch, 34, 0);
+                writeUint16LE(ch, 36, 0);
+                writeUint32LE(ch, 38, 0);
+                writeUint32LE(ch, 42, rec.offset);
+                ch.set(rec.nameBytes, 46);
+                parts.push(ch);
+                offset += ch.length;
+            }
+            const centralDirSize = offset - centralDirStart;
+
+            const eocd = new Uint8Array(22);
+            writeUint32LE(eocd, 0, 0x06054b50);
+            writeUint16LE(eocd, 4, 0);
+            writeUint16LE(eocd, 6, 0);
+            writeUint16LE(eocd, 8, centralRecords.length);
+            writeUint16LE(eocd, 10, centralRecords.length);
+            writeUint32LE(eocd, 12, centralDirSize);
+            writeUint32LE(eocd, 16, centralDirStart);
+            writeUint16LE(eocd, 20, 0);
+            parts.push(eocd);
+
+            const zipFileName = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5) + '.zip';
+            return new File(parts, zipFileName, { type: 'application/zip' });
         }
 
         // ---------- PNG 스터빙 ----------
@@ -1416,11 +1804,11 @@
 
         // ---------- 다운로드 (하위호환: 구버전 단일-암호화 방식, 전체를 메모리에 모음) ----------
         async function downloadFromBlossom(hash, chunkHashes) {
-            const chunks = [];
+            const chunks = new Array(chunkHashes.length);
+            const prefetcher = createPrefetcher(chunkHashes.length, (i) => downloadSingleChunk(chunkHashes[i], i), 4);
 
             for (let i = 0; i < chunkHashes.length; i++) {
-                const plainChunk = await downloadSingleChunk(chunkHashes[i], i);
-                chunks.push(plainChunk);
+                chunks[i] = await prefetcher.get(i);
             }
 
             const data = assembleChunks(chunks);
@@ -1835,29 +2223,18 @@
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
 
-            const filePromises = files.map(file => {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                        resolve({
-                            name: file.name,
-                            path: file.name,
-                            size: file.size,
-                            type: file.type,
-                            data: new Uint8Array(ev.target.result),
-                            file: file
-                        });
-                    };
-                    reader.readAsArrayBuffer(file);
-                });
-            });
+            const results = files.map(file => ({
+                name: file.name,
+                path: file.name,
+                size: file.size,
+                type: file.type,
+                file: file
+            }));
 
-            Promise.all(filePromises).then(results => {
-                multiFileData = multiFileData.concat(results);
-                selectedFiles = multiFileData.map(r => r.file);
-                renderFileList();
-            });
-            
+            multiFileData = multiFileData.concat(results);
+            selectedFiles = multiFileData.map(r => r.file);
+            renderFileList();
+
             fileInput.value = '';
         });
 
@@ -1886,8 +2263,10 @@
             multiUploadBtn.classList.add('visible');
             
             document.querySelectorAll('.remove-btn').forEach(btn => {
+                btn.disabled = isMultiUploading;
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
+                    if (isMultiUploading) return;
                     const index = parseInt(btn.dataset.index);
                     removeFileFromList(index);
                 });
@@ -1896,6 +2275,7 @@
 
         // ---------- 파일 리스트에서 제거 함수 ----------
         function removeFileFromList(index) {
+            if (isMultiUploading) return;
             multiFileData.splice(index, 1);
             selectedFiles.splice(index, 1);
             renderFileList();
@@ -1940,52 +2320,45 @@
                 return;
             }
 
-            const readPromises = files.map(file => {
-                return new Promise((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                        resolve({
-                            name: file.name,
-                            path: file.name,
-                            size: file.size,
-                            type: file.type,
-                            data: new Uint8Array(ev.target.result),
-                            file: file
-                        });
-                    };
-                    reader.readAsArrayBuffer(file);
-                });
-            });
+            const results = files.map(file => ({
+                name: file.name,
+                path: file.name,
+                size: file.size,
+                type: file.type,
+                file: file
+            }));
 
-            Promise.all(readPromises).then(results => {
-                multiFileData = multiFileData.concat(results);
-                selectedFiles = multiFileData.map(r => r.file);
-                renderFileList();
-            });
+            multiFileData = multiFileData.concat(results);
+            selectedFiles = multiFileData.map(r => r.file);
+            renderFileList();
         });
 
         // ---------- 멀티 업로드 ----------
+        let isMultiUploading = false;
         multiUploadBtn.addEventListener('click', async () => {
+            if (isMultiUploading || multiUploadBtn.disabled) return;
             if (multiFileData.length === 0) {
                 alert(t('selectFilesAlert'));
                 return;
             }
+            isMultiUploading = true;
             multiUploadBtn.disabled = true;
             multiUploadBtn.textContent = t('uploading');
             try {
-                const JSZip = (await import('https://cdn.jsdelivr.net/npm/jszip@3.10.1/+esm')).default;
-                const zip = new JSZip();
-                
-                for (const f of multiFileData) {
-                    zip.file(f.path, f.data);
+                if (multiFileData.length === 1) {
+                    await handleFile(multiFileData[0].file);
+                } else {
+                    const entries = multiFileData.map(f => ({ name: f.path, file: f.file }));
+                    multiUploadBtn.textContent = t('compressing');
+                    const zipFile = await buildStreamingZip(entries, (idx, total, done, fileTotal) => {
+                        const pct = fileTotal ? Math.min(100, Math.round((done / fileTotal) * 100)) : 0;
+                        multiUploadBtn.textContent = `${t('compressing')} (${idx + 1}/${total}, ${pct}%)`;
+                    });
+
+                    multiUploadBtn.textContent = t('uploading');
+                    await handleFile(zipFile);
                 }
-                
-                const zipBlob = await zip.generateAsync({ type: 'blob' });
-                const zipFileName = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5) + '.zip';
-                const zipFile = new File([zipBlob], zipFileName, { type: 'application/zip' });
-                
-                await handleFile(zipFile);
-                
+
                 selectedFiles = [];
                 multiFileData = [];
                 fileListItems.innerHTML = '';
@@ -1999,6 +2372,7 @@
                     <div style="font-size:13px;margin-top:6px;color:#8b949e;">${err.message}</div>
                 `, true);
             } finally {
+                isMultiUploading = false;
                 multiUploadBtn.disabled = false;
                 multiUploadBtn.textContent = t('compressAndUpload');
             }
@@ -3110,34 +3484,6 @@
 
 
 
-        // ---------- 파일 청크 분할 다운로드 함수 ----------
-        // parts: Uint8Array 조각들의 배열(복호화 결과). 전체를 하나로 합치지 않고
-        // Blob.slice()를 이용해 다운로드용 조각(part)만큼만 잘라 하나씩 저장한다.
-        async function downloadFileAsChunks(parts, filename, chunkSize = 10 * 1024 * 1024) {
-            const fullBlob = new Blob(parts); // 이어붙이기만 함, 배열 복사는 하지 않음
-            const totalSize = fullBlob.size;
-            const totalChunks = Math.ceil(totalSize / chunkSize) || 1;
-
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * chunkSize;
-                const end = Math.min(start + chunkSize, totalSize);
-                const chunkBlob = fullBlob.slice(start, end);
-                const chunkUrl = URL.createObjectURL(chunkBlob);
-
-                const a = document.createElement('a');
-                a.href = chunkUrl;
-                a.download = `${filename}.part${String(i + 1).padStart(3, '0')}.chunk`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-
-                setTimeout(() => URL.revokeObjectURL(chunkUrl), 1000);
-                await new Promise(resolve => setTimeout(resolve, 300));
-            }
-
-            return totalChunks;
-        }
-
         // ---------- 이벤트 조회 ----------
         async function fetchEventFromRelays(eventId) {
             // eventId가 이미 hex 형식인지 확인 (64자리 16진수)
@@ -3292,35 +3638,55 @@
                     return;
                 }
 
+                let opfsSink = null;
                 try {
                     showDecryptResult(t('downloadingChunks'), false);
 
                     let result;
+                    let batchInfo = null;
                     if (parsed.legacy) {
-                        // 구버전 공유 링크(단일 IV, 전체 일괄 암호화) 하위호환 처리
                         const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
                         showDecryptResult(t('decrypting'), false);
                         const legacyResult = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
                         result = { ...legacyResult, parts: [legacyResult.data] };
+                        triggerBlobDownload(new Blob(result.parts), result.filename || 'file');
                     } else {
-                        // 신버전: 청크를 하나씩 다운로드하며 그 자리에서 복호화 (전체를 메모리에 모으지 않음)
+                        if (supportsOPFS()) {
+                            try {
+                                opfsSink = await createOPFSSink();
+                            } catch (opfsErr) {
+                                opfsSink = null;
+                            }
+                        }
+                        const downloader = opfsSink ? null : createBatchedDownloader(DOWNLOAD_BATCH_BYTES);
+
                         showDecryptResult(t('decryptingProgress', { current: 0, total: parsed.chunkHashes.length }), false);
                         result = await decryptFileStreaming(
                             parsed.chunkHashes.length,
                             parsed.key,
                             parsed.chunkIVs,
                             async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i),
-                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false)
+                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false),
+                            opfsSink
+                                ? async (plainChunk) => { await opfsSink.write(plainChunk); }
+                                : async (plainChunk) => { await downloader.onPlainChunk(plainChunk); },
+                            4,
+                            downloader ? (meta) => downloader.onMetadata(meta) : null
                         );
-                        // 파일 무결성 검증(결합 해시)
                         const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
                         const computedHash = await sha256(joined);
                         if (uint8ToHex(computedHash) !== parsed.hash) {
                             throw new Error('전체 파일 해시 불일치');
                         }
+
+                        if (opfsSink) {
+                            await opfsSink.close();
+                        } else {
+                            batchInfo = await downloader.finish();
+                        }
                     }
 
-                    // ★★★ autoDelete 처리 - fromNostr이 true일 때만 실행 ★★★
+                    // autoDelete 처리 - fromNostr이 true일 때만 실행
                     if (result.autoDelete && result.deleteKeys && fromNostr) {
                         showDecryptResult('Deleting files...', false);
                         const dk = result.deleteKeys;
@@ -3402,58 +3768,26 @@
                         showDecryptResult('Deleted files.', false);
                     }
 
-                    // 파일 다운로드 로직
-                    // ★ result.parts는 순차적으로 복호화된 청크 조각들의 배열이다.
-                    // new Blob(parts)는 조각들을 이어붙일 뿐 하나의 거대한 배열로 복사하지 않으므로 메모리 부담이 적다.
-                    const totalBytes = result.parts.reduce((sum, p) => sum + p.length, 0);
-                    const fileSizeMB = totalBytes / (1024 * 1024);
-                    if (fileSizeMB > 10) {
-                        showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
-
-                        const downloadHtml = `
-                            <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #f0883e;">
-                                <span class="text-muted">${t('fileTooBigPackage', { mb: fileSizeMB.toFixed(1) })}</span>
-                                <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-                                    <button class="btn" id="downloadFullBtn2" style="font-size:12px;padding:6px 16px;">${t('downloadFull')}</button>
-                                </div>
-                            </div>
-                        `;
-                        decryptResult.innerHTML += downloadHtml;
-
-                        document.getElementById('downloadFullBtn2')?.addEventListener('click', () => {
-                            const blob = new Blob(result.parts);
-                            const downloadUrl = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = downloadUrl;
-                            a.download = result.filename || 'file';
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                            setTimeout(() => URL.revokeObjectURL(downloadUrl), 5000);
-                            showDecryptResult(t('downloadStarted', { name: result.filename }), false);
+                    if (opfsSink) {
+                        const filename = result.filename || 'file';
+                        const fileHandleRef = opfsSink.fileHandle;
+                        renderReadyDownloadButton(decryptResult, filename, result.size, async () => {
+                            return await downloadFromOPFSHandle(fileHandleRef, filename);
                         });
-
-                        isProcessing = false;
-                        return;
+                    } else if (batchInfo && batchInfo.multiPart) {
+                        showDecryptResult(t('downloadCompleteNamed', {
+                            name: `${batchInfo.filename} (${batchInfo.totalParts} parts)`,
+                            size: ((result.size || 0) / 1024).toFixed(1)
+                        }), false);
+                    } else {
+                        showDecryptResult(t('downloadCompleteNamed', {
+                            name: result.filename,
+                            size: ((result.size || 0) / 1024).toFixed(1)
+                        }), false);
                     }
 
-                    // 일반 파일 다운로드
-                    const blob = new Blob(result.parts);
-                    const url2 = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url2;
-                    a.download = result.filename || 'file';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url2), 5000);
-
-                    showDecryptResult(t('downloadCompleteNamed', {
-                        name: result.filename,
-                        size: (totalBytes / 1024).toFixed(1)
-                    }), false);
-
                 } catch (err) {
+                    if (opfsSink) { await opfsSink.abort(); await opfsSink.cleanup(); }
                     showDecryptResult(t('decryptFail', { err: err.message }), true);
                     console.error(err);
                 }
@@ -3503,104 +3837,74 @@
                     return;
                 }
         
+                let opfsSink = null;
                 try {
                     showDecryptResult(t('downloadingChunks'), false);
-        
+
                     let result;
+                    let batchInfo = null;
                     if (parsed.legacy) {
-                        // 구버전 공유 링크 하위호환
                         const { data: ciphertext } = await downloadFromBlossom(parsed.hash, parsed.chunkHashes);
                         showDecryptResult(t('decrypting'), false);
                         const legacyResult = await decryptFileWithName(ciphertext, parsed.key, parsed.iv);
                         result = { ...legacyResult, parts: [legacyResult.data] };
+                        triggerBlobDownload(new Blob(result.parts), result.filename || 'file');
                     } else {
+                        if (supportsOPFS()) {
+                            try {
+                                opfsSink = await createOPFSSink();
+                            } catch (opfsErr) {
+                                opfsSink = null;
+                            }
+                        }
+                        const downloader = opfsSink ? null : createBatchedDownloader(DOWNLOAD_BATCH_BYTES);
+
                         showDecryptResult(t('decryptingProgress', { current: 0, total: parsed.chunkHashes.length }), false);
                         result = await decryptFileStreaming(
                             parsed.chunkHashes.length,
                             parsed.key,
                             parsed.chunkIVs,
                             async (i) => await downloadSingleChunk(parsed.chunkHashes[i], i),
-                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false)
+                            (current, total) => showDecryptResult(t('decryptingProgress', { current, total }), false),
+                            opfsSink
+                                ? async (plainChunk) => { await opfsSink.write(plainChunk); }
+                                : async (plainChunk) => { await downloader.onPlainChunk(plainChunk); },
+                            4,
+                            downloader ? (meta) => downloader.onMetadata(meta) : null
                         );
                         const joined = new TextEncoder().encode(parsed.chunkHashes.join(','));
                         const computedHash = await sha256(joined);
                         if (uint8ToHex(computedHash) !== parsed.hash) {
                             throw new Error('전체 파일 해시 불일치');
                         }
+
+                        if (opfsSink) {
+                            await opfsSink.close();
+                        } else {
+                            batchInfo = await downloader.finish();
+                        }
                     }
-        
-                    const totalBytes = result.parts.reduce((sum, p) => sum + p.length, 0);
-                    const fileSizeMB = totalBytes / (1024 * 1024);
-                    if (fileSizeMB > 10) {
-                        showDecryptResult(t('decryptDoneSize', { mb: fileSizeMB.toFixed(1) }), false);
-                        
-                        const downloadHtml = `
-                            <div style="margin-top:12px;padding:10px;background:#0d1117;border-radius:6px;border:1px solid #f0883e;">
-                                <span class="text-muted">${t('fileTooBigPackage', { mb: fileSizeMB.toFixed(1) })}</span>
-                                <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-                                    <button class="btn" id="downloadFullBtn" style="font-size:12px;padding:6px 16px;">${t('downloadFull')}</button>
-                                    <button class="btn btn-secondary" id="downloadSplitBtn" style="font-size:12px;padding:6px 16px;">${t('downloadSplit')}</button>
-                                </div>
-                                <div id="splitProgress" style="margin-top:8px;font-size:12px;color:#8b949e;"></div>
-                            </div>
-                        `;
-                        decryptResult.innerHTML += downloadHtml;
-                        
-                        document.getElementById('downloadFullBtn')?.addEventListener('click', () => {
-                            const blob = new Blob(result.parts);
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = result.filename || 'file';
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                            setTimeout(() => URL.revokeObjectURL(url), 5000);
-                            showDecryptResult(t('downloadStarted', { name: result.filename }), false);
+
+                    if (opfsSink) {
+                        const filename = result.filename || 'file';
+                        const fileHandleRef = opfsSink.fileHandle;
+                        renderReadyDownloadButton(decryptResult, filename, result.size, async () => {
+                            return await downloadFromOPFSHandle(fileHandleRef, filename);
                         });
-                        
-                        document.getElementById('downloadSplitBtn')?.addEventListener('click', async () => {
-                            const progressDiv = document.getElementById('splitProgress');
-                            progressDiv.textContent = t('preparing');
-                            
-                            try {
-                                const totalChunks = await downloadFileAsChunks(
-                                    result.parts,
-                                    result.filename || 'file',
-                                    10 * 1024 * 1024
-                                );
-                                
-                                progressDiv.innerHTML = `
-                                    ${t('splitDownloaded', { count: totalChunks })}<br>
-                                    <span style="font-size:11px;color:#484f58;">
-                                        ${t('fileName', { name: result.filename })}.part001.chunk ~ ${result.filename}.part${String(totalChunks).padStart(3, '0')}.chunk
-                                    </span>
-                                `;
-                            } catch (err) {
-                                progressDiv.innerHTML = t('decryptFail', { err: err.message });
-                            }
-                        });
-                        
-                        isProcessing = false;
-                        return;
+                    } else if (batchInfo && batchInfo.multiPart) {
+                        showDecryptResult(t('downloadCompleteNamed', {
+                            name: `${batchInfo.filename} (${batchInfo.totalParts} parts)`,
+                            size: ((result.size || 0) / 1024).toFixed(1)
+                        }), false);
+                    } else {
+                        showDecryptResult(t('downloadCompleteNamed', {
+                            name: result.filename,
+                            size: ((result.size || 0) / 1024).toFixed(1)
+                        }), false);
                     }
-                    
-                    const blob = new Blob(result.parts);
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = result.filename || 'file';
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url), 5000);
-        
-                    showDecryptResult(t('downloadCompleteNamed', { 
-                        name: result.filename, 
-                        size: (totalBytes / 1024).toFixed(1) 
-                    }), false);
-                    
+
                 } catch (err) {
+                    if (opfsSink) { await opfsSink.abort(); await opfsSink.cleanup(); }
                     showDecryptResult(t('decryptFail', { err: err.message }), true);
                     console.error(err);
                 }
